@@ -1,79 +1,124 @@
 # generators/quality_gate.py
 import re
-from generators.style_guard import validate_post_style, record_post
 
-# Existing patterns (keep from before)
+# Patterns that indicate reasoning/planning (HARUS ditolak)
 REJECT_PATTERNS = [
-    r"(?i)^(okay|alright|sure|let's|let me|i need|i will|i'm going|first,|so,|now,|the user)",
+    r"(?i)^(okay|alright|sure|let's|let me|i need|i will|i'm going|first,|so,|now,)",
     r"(?i)(let me (think|draft|write|craft|analyze|see|check|try))",
     r"(?i)(i need to (write|create|craft|produce|make|do))",
     r"(?i)(the user (wants|asked|gave|provided|said))",
     r"(?i)^draft",
     r"(?i)^let's see",
+    r"(?i)^wait[, ]",
+    r"(?i)^the user",
+    r"(?i)\(example says\)",
 ]
 
-VALID_STARTS = [
-    "$", "volume", "price", "the", "a", "this", "that", "these", "those",
-    "watching", "tracking", "worth", "market", "crypto", "token", "chart",
-    "something", "someone", "nobody", "everyone",
-]
+# Track recent posts for similarity check (simple version)
+_recent_posts = []
+
 
 def is_reasoning_leak(content: str) -> bool:
+    """Check if content contains reasoning/planning language."""
     if not content:
         return True
     
     content_lower = content.lower().strip()
-    first_part = content_lower[:300]
     
+    # Check first 200 chars for rejection patterns
+    first_part = content_lower[:200]
     for pattern in REJECT_PATTERNS:
         if re.search(pattern, first_part):
             return True
     
-    first_line = content.split('\n')[0].strip().lower()
-    if len(first_line) > 100:
-        return True
+    # Valid if starts with $SYMBOL (like $lunc, $btc)
+    if content_lower.startswith('$'):
+        return False
     
-    if first_line.startswith(('okay', 'alright', 'sure', 'let me', 'i need', 'based on')):
-        return True
+    # Valid if starts with common crypto observation starters
+    valid_starts = [
+        'volume', 'price', 'the', 'a', 'this', 'that', 'these',
+        'watching', 'tracking', 'worth', 'market', 'crypto', 'token',
+        'something', 'someone', 'dip', 'pump', 'dump', 'bleed',
+        'green', 'red', 'quiet', 'loud'
+    ]
+    first_word = content_lower.split()[0] if content_lower.split() else ''
+    if first_word in valid_starts:
+        return False
     
-    paragraphs = content.split('\n\n')
-    if len(paragraphs) < 2:
-        return True
+    # If first word is short alphanumeric (like "lunc"), might be valid
+    if len(first_word) <= 10 and re.match(r'^[a-z]+$', first_word):
+        return False
     
-    if len(content) < 50:
-        return True
-    
-    return False
+    # Default: if first word is not in valid list and not a symbol, reject
+    return True
 
 
 def validate_post(content: str) -> tuple[bool, str]:
-    """
-    Full validation including reasoning leak, style, and similarity
-    """
+    """Validate post content."""
     if not content:
         return False, "Empty content"
     
-    # Check for reasoning leak
+    # Reject reasoning leak
     if is_reasoning_leak(content):
         return False, "Reasoning leak detected"
     
-    # Check style (banned phrases, generic patterns, similarity)
-    valid, msg = validate_post_style(content)
-    if not valid:
-        return False, msg
+    # Reject if too short
+    if len(content) < 30:
+        return False, "Content too short"
+    
+    # Reject if too many newlines (empty paragraphs)
+    if content.count('\n\n') > 5:
+        return False, "Too many line breaks"
     
     return True, content
 
 
 def finalize_post(content: str, symbol: str) -> str:
-    """Apply final cleanup and record post"""
+    """Final cleanup and add symbol if missing."""
     content = content.strip()
     
-    # Ensure symbol is present
-    if f"${symbol}" not in content:
-        content = f"${symbol}. " + content
+    # Remove existing $SYMBOL at very beginning (if any)
+    if content.startswith(f'${symbol}'):
+        # Remove the $SYMBOL from start, keep the rest
+        content = content[len(f'${symbol}'):].lstrip()
+        # Remove leading dot, space, comma
+        content = re.sub(r'^[.,\s]+', '', content)
     
-    # Record for similarity check
-    record_post(content)
+    # Ensure symbol is present at beginning (clean)
+    content = f"${symbol} " + content
+    
+    # Fix double spaces
+    content = re.sub(r' {2,}', ' ', content)
+    
+    # Remove multiple consecutive newlines
+    content = re.sub(r'\n{3,}', '\n\n', content)
+    
+    # Ensure last character is not lonely punctuation
+    content = re.sub(r'\.\s*$', '.', content)
     
     return content
+
+
+def is_similar_to_recent(content: str, threshold: float = 0.7) -> bool:
+    """Check if content is too similar to recent posts."""
+    if not _recent_posts:
+        return False
+    
+    words = set(content.lower().split())
+    for prev in _recent_posts[-5:]:  # Check last 5 posts
+        prev_words = set(prev.lower().split())
+        if not words or not prev_words:
+            continue
+        intersection = words.intersection(prev_words)
+        similarity = len(intersection) / max(len(words), len(prev_words))
+        if similarity > threshold:
+            return True
+    return False
+
+
+def record_post(content: str):
+    """Add post to history."""
+    _recent_posts.append(content)
+    if len(_recent_posts) > 20:
+        _recent_posts.pop(0)

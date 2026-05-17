@@ -4,7 +4,9 @@ import logging
 import requests
 from typing import List, Dict, Any
 from config import STABLE_BLACKLIST
+from config import FIRST_SEEN_FILE
 
+_FIRST_SEEN_FILE = FIRST_SEEN_FILE
 log = logging.getLogger(__name__)
 
 def fetch_binance_tickers() -> List[Dict[str, Any]]:

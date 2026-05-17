@@ -1,4 +1,4 @@
-# schedulers/orchestrator.py — Stable pipeline
+# schedulers/orchestrator.py
 import time
 import random
 import threading
@@ -6,6 +6,7 @@ from queue import Queue
 from datetime import datetime
 
 from collectors.binance import fetch_all_binance, fetch_new_listings
+from collectors.rss_news import fetch_all_news, get_catalyst_summary
 from processors.normalize import normalize_token
 from processors.classify import classify
 from processors.dedupe import is_duplicate, mark_posted, clear_old_entries
@@ -19,6 +20,11 @@ data_queue = Queue(maxsize=500)
 post_queue = Queue(maxsize=100)
 stop_flag = threading.Event()
 _shutdown = False
+
+# News cache
+_news_cache = []
+_last_news_refresh = 0
+NEWS_REFRESH_INTERVAL = 300  # 5 minutes
 
 
 def check_shutdown():
@@ -34,38 +40,65 @@ def check_shutdown():
     return _shutdown
 
 
+def refresh_news_cache():
+    """Refresh news cache if needed"""
+    global _news_cache, _last_news_refresh
+    now = time.time()
+    if now - _last_news_refresh > NEWS_REFRESH_INTERVAL:
+        print("  📰 Refreshing news cache...")
+        _news_cache = fetch_all_news()
+        _last_news_refresh = now
+        print(f"  📰 News cache updated: {len(_news_cache)} articles")
+    return _news_cache
+
+
 def collector_worker():
-    """Fetch tokens from Binance only (stable)"""
+    """Fetch tokens from Binance + refresh news cache"""
     print("  🧠 Collector started")
+    
     while not stop_flag.is_set():
         try:
             if check_shutdown():
                 break
-            
+
+            # Refresh news cache periodically
+            refresh_news_cache()
+
             # Fetch Binance tokens
             binance_tokens = fetch_all_binance(limit=200)
-            
+
             # Fetch new listings for age calculation
             new_listings = fetch_new_listings()
-            
-            # Add age_hours to tokens
+
+            # Add age_hours and news context to tokens
             for token in binance_tokens:
                 full_symbol = token.get("full_symbol", "")
+                symbol = token.get("symbol", "")
+                
+                # Age calculation
                 token["age_hours"] = 12 if full_symbol in new_listings else 100
-            
+                
+                # Add news catalyst summary if available
+                catalyst = get_catalyst_summary(symbol, _news_cache)
+                if catalyst:
+                    token["news_catalyst"] = catalyst
+
             # Queue tokens
+            queued = 0
             for token in binance_tokens:
                 if not check_shutdown():
                     data_queue.put(("binance", token))
-            
-            print(f"  📡 Fetched {len(binance_tokens)} Binance tokens")
-            
+                    queued += 1
+
+            print(f"  📡 Fetched {len(binance_tokens)} Binance tokens, queued {queued}")
+            print(f"  📰 News cache age: {int(time.time() - _last_news_refresh)}s, {len(_news_cache)} articles")
+
             # Clean old dedup entries
             clear_old_entries()
-            
+
             # Wait before next fetch
             time.sleep(60)
-            
+
         except Exception as e:
             print(f"  ❌ Collector error: {e}")
             time.sleep(30)
@@ -90,6 +123,10 @@ def processor_worker(worker_id: int):
             
             # Check duplicate and limit
             if cat and not is_duplicate(token["symbol"], cat) and can_post():
+                # Pass news context to generator via token
+                if "news_catalyst" in raw:
+                    token["news_catalyst"] = raw["news_catalyst"]
+                
                 post = generate_post(token, cat, {})
                 if post:
                     post_queue.put((post, cat, token["symbol"]))
@@ -147,11 +184,19 @@ def poster_worker():
 
 def run_orchestrator():
     """Start the full pipeline"""
+    global _last_news_refresh, _news_cache
+    
     print(f"\n{'='*50}")
     print(f"🚀 Starting Pipeline Orchestrator")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📊 Daily limit: {DAILY_POST_LIMIT} posts/day")
+    print(f"📰 News refresh interval: {NEWS_REFRESH_INTERVAL}s")
     print(f"{'='*50}\n")
+    
+    # Initialize news cache
+    _last_news_refresh = 0
+    _news_cache = []
+    refresh_news_cache()
     
     # Reset shutdown flag
     global _shutdown

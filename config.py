@@ -1,4 +1,4 @@
-# config.py — Full configuration for 6 categories + 3 LLM providers
+# config.py — update path section
 import os
 from dotenv import load_dotenv
 
@@ -11,10 +11,21 @@ BINANCE_SQUARE_KEY = os.getenv("BINANCE_SQUARE_KEY")
 BINANCE_SQUARE_URL = os.getenv("BINANCE_SQUARE_URL")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY")
+BITQUERY_API_KEY   = os.getenv("BITQUERY_API_KEY")
 
-# PATHS
+# ========== PATHS ==========
 BASE_DIR = "/data/data/com.termux/files/home/binance"
-DEDUP_FILE = f"{BASE_DIR}/dedup_cache.json"
+CACHE_DIR = f"{BASE_DIR}/cache"
+
+# Pastikan folder cache ada
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# Cache files
+DEDUP_FILE = f"{CACHE_DIR}/dedup_cache.json"
+POST_COUNTER_FILE = f"{CACHE_DIR}/post_counter.json"
+FIRST_SEEN_FILE = f"{CACHE_DIR}/first_seen.json"
+COINGECKO_CACHE_FILE = f"{CACHE_DIR}/coingecko_cache.json"
+LLM_CACHE_FILE = f"{CACHE_DIR}/llm_cache.json"
 
 # BLACKLISTS
 STABLE_BLACKLIST = {
@@ -32,7 +43,7 @@ LLM_PROVIDERS = {
         "api_url": "http://127.0.0.1:8402/v1/chat/completions",
         "model": "free/deepseek-v3.2",
         "max_tokens": 500,
-        "temperature": 0.75,
+        "temperature": 0.55,
         "top_p": 0.9,
         "requests_per_minute": 15,
         "enabled": True,
@@ -62,14 +73,12 @@ LLM_PROVIDERS = {
     }
 }
 
-# Category to preferred provider (optional, fallback to round-robin)
+# Category to preferred provider
 CATEGORY_PREFERRED = {
     "HOT": "blockrun",
     "ALPHA": "blockrun",
-    "NEW": "blockrun",
     "GAINERS": "blockrun",
     "LOSERS": "blockrun",
-    "SIGNAL": "blockrun",
 }
 
 POST_MODE = "rebate"
@@ -77,9 +86,16 @@ POST_MODE = "rebate"
 # Pipeline settings
 COLLECTOR_INTERVAL = 60
 PROCESSOR_WORKERS = 2
-#POST_DELAY_MIN = 60
-#POST_DELAY_MAX = 120
 
 # Daily post limit (Binance Square = 100 posts/day)
 DAILY_POST_LIMIT = 100
-POST_COUNTER_FILE = f"{BASE_DIR}/post_counter.json"
+
+# ========== COINGECKO CONFIG ==========
+COINGECKO_ENABLED = True
+COINGECKO_CACHE_TTL = 300  # 5 minutes
+COINGECKO_RATE_LIMIT_SECONDS = 6  # 10 calls per minute
+
+# ========== RSS NEWS CONFIG ==========
+RSS_ENABLED = True
+RSS_MAX_ARTICLES_PER_SOURCE = 5
+RSS_REFRESH_INTERVAL = 300  # 5 minutes

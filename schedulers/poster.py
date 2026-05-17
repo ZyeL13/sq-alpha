@@ -57,8 +57,6 @@ def post_to_telegram(text, category):
         "GAINERS": "🚀 GAINERS", 
         "LOSERS": "📉 LOSERS",
         "ALPHA": "🐺 ALPHA",
-        "NEW": "🆕 NEW",
-        "SIGNAL": "📊 SIGNAL"
     }
     label = label_map.get(category, category)
     full = f"✍️ *yè writing... — {label}*\n\n{text}"

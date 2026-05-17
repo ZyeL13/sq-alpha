@@ -2,82 +2,75 @@ import random
 
 HOOKS = {
     "HOT": [
-        "volume is loud. price barely reacts.",
-        "something is being absorbed here.",
-        "the move looks smaller than the flow.",
-        "activity is rising. conviction isn't obvious yet.",
+        "volume picked up while price stayed relatively flat.",
+        "activity increased around current levels.",
+        "more volume than expected for this move.",
     ],
     "GAINERS": [
-        "green candles hide a lot of behavior.",
-        "up only, until it isn't.",
-        "price is moving faster than attention.",
-        "strength is visible. conviction is less obvious.",
+        "strong move with volume still active.",
+        "price moved higher and interest hasn't faded yet.",
+        "momentum is still holding for now.",
     ],
     "LOSERS": [
-        "red attracts attention. not always clarity.",
-        "the selloff looks emotional.",
-        "weak hands usually move first.",
-        "price is fading faster than interest.",
+        "price pulled back sharply today.",
+        "selling pressure remains visible.",
+        "momentum weakened into this session.",
     ],
     "ALPHA": [
-        "wallet behavior looks cleaner than price action.",
-        "trade flow is more interesting than the chart.",
-        "someone is positioning quietly.",
-        "not much noise around this one.",
+        "worth a closer look based on recent activity.",
+        "market activity here looks more active than usual.",
+        "this one is seeing steady interest.",
     ],
     "NEW": [
-        "first days usually reveal intent fast.",
-        "new listings exaggerate everything.",
-        "price discovery gets messy early.",
-        "attention is fresh. conviction isn't.",
+        "early trading is setting the range.",
+        "first sessions are shaping price discovery.",
+        "new listing activity remains active.",
     ],
     "SIGNAL": [
-        "low noise. interesting flow.",
-        "quiet charts sometimes matter more.",
-        "not much attention here yet.",
-        "small cap, unusual behavior.",
+        "activity is picking up quietly.",
+        "not much attention here yet, but flow is active.",
+        "volume behavior stands out slightly.",
     ],
 }
 
 ANGLES = {
     "anomaly": [
-        "volume and price aren't aligned yet.",
-        "flow suggests more activity than price reflects.",
+        "volume expanded faster than price movement.",
+        "market activity looks stronger than price suggests.",
     ],
     "accumulation": [
-        "wallet rotation looks controlled.",
-        "positions appear to be building slowly.",
+        "trading activity stayed consistent near these levels.",
+        "buyers are still active around current price.",
     ],
     "relative_strength": [
-        "holding structure better than nearby names.",
-        "less weakness than expected in this tape.",
+        "holding better than nearby names.",
+        "showing more stability than expected.",
     ],
     "underreaction": [
-        "market response feels muted.",
-        "attention hasn't caught up yet.",
+        "price reaction has been fairly muted so far.",
+        "market response still looks limited.",
     ],
     "distribution": [
-        "strength is meeting supply overhead.",
-        "buyers are getting tested here.",
+        "upside is meeting resistance near current range.",
+        "price is testing whether buyers stay active.",
     ],
     "capitulation": [
-        "forced exits may be slowing down.",
-        "panic behavior looks less aggressive now.",
+        "selling pace may be slowing.",
+        "downside momentum looks less aggressive now.",
     ],
 }
 
 CTA_VARIANTS = [
     "tracking ${symbol}.",
     "watching ${symbol}.",
-    "keeping an eye on ${symbol}.",
-    "${symbol} on radar.",
+    "${symbol} on watchlist.",
+    "monitoring ${symbol}.",
 ]
 
 TRANSITIONS = [
     "worth noting:",
-    "closer look:",
     "key detail:",
-    "what stands out:",
+    "for context:",
 ]
 
 def get_hook(category: str) -> str:
@@ -92,7 +85,7 @@ def get_angle(angle_type: str = None) -> str:
 def get_cta(symbol: str) -> str:
     return random.choice(CTA_VARIANTS).replace("${symbol}", f"${symbol}")
 
-def get_transition(probability=0.35) -> str:
+def get_transition(probability=0.2) -> str:
     if random.random() > probability:
         return ""
     return random.choice(TRANSITIONS)

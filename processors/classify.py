@@ -5,7 +5,8 @@ from collectors.binance import get_token_age_hours
 MEGA_CAPS = {
     "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX",
     "TON", "SUI", "NEAR", "PEPE", "SHIB", "LINK", "AVAX",
-    "DOT", "MATIC", "UNI", "ATOM", "LTC", "ETC", "ICP", "BCH"
+    "DOT", "MATIC", "UNI", "ATOM", "LTC", "ETC", "ICP", "BCH",
+    "ZEC", "XMR", "DASH", "ZEN", "BTG",  # tambah token lama
 }
 
 
@@ -19,15 +20,9 @@ def classify(token: Dict[str, Any]) -> Optional[str]:
     mcap = token.get("market_cap", 0)
     volume = token.get("volume_24h", 0)
     
-    # Get accurate age
-    full_symbol = token.get("full_symbol", f"{symbol}USDT")
-    age_hours = token.get("age_hours")
-    if age_hours is None:
-        age_hours = get_token_age_hours(symbol, full_symbol)
-    
-    # NEW: less than 24 hours old
-    if age_hours < 24:
-        return "NEW"
+    # NEW category disabled (false positive too high)
+    # if token.get("age_hours", 100) < 24:
+    #     return "NEW"
     
     # HOT: top 15 volume, price change under 2% (anomaly)
     if vol_rank <= 15 and abs(chg) < 2.0:
@@ -44,5 +39,9 @@ def classify(token: Dict[str, Any]) -> Optional[str]:
     # ALPHA: small cap (< $1M) with decent volume
     if mcap < 1_000_000 and volume > 100_000:
         return "ALPHA"
+    
+    # SIGNAL: microcap (< $300k) with any volume (disabled, perlu Bitquery)
+    # if mcap < 300_000 and volume > 50_000:
+    #     return "SIGNAL"
     
     return None

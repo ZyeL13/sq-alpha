@@ -4,8 +4,9 @@ import os
 import hashlib
 import time
 from typing import Optional
+from config import LLM_CACHE_FILE
 
-CACHE_FILE = "/data/data/com.termux/files/home/binance/llm_cache.json"
+CACHE_FILE = LLM_CACHE_FILE
 CACHE_TTL_SECONDS = 3600  # 1 jam
 
 _cache: dict = {}
