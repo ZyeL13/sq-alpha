@@ -131,6 +131,7 @@ def processor_worker(worker_id: int):
                 if post:
                     post_queue.put((post, cat, token["symbol"]))
                     print(f"  ✍️ P{worker_id}: {token['symbol']} → {cat}")
+                    time.sleep(random.uniform(2, 5))  # Tambah delay 2-5 detik
                 else:
                     print(f"  ⚠️ P{worker_id}: {token['symbol']} → {cat} (no post)")
             

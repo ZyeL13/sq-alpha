@@ -85,7 +85,7 @@ POST_MODE = "rebate"
 
 # Pipeline settings
 COLLECTOR_INTERVAL = 60
-PROCESSOR_WORKERS = 2
+PROCESSOR_WORKERS = 1
 
 # Daily post limit (Binance Square = 100 posts/day)
 DAILY_POST_LIMIT = 100
