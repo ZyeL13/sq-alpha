@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Cache & Data files
+*.json
+!requirements.json
+dedup_cache.json
+first_seen.json
+llm_cache.json
+post_counter.json
+news_seen.json
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Termux specific
+.bash_history
+.zsh_history
+
+# Backup files
+*.bak
+*.backup
+
+# Local config overrides
+config_local.py
