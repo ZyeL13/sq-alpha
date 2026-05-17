@@ -1,12 +1,19 @@
 # processors/classify.py
 from typing import Dict, Any, Optional
-from collectors.binance import get_token_age_hours
+from config import (
+    HOT_VOLUME_RANK_MAX,
+    HOT_PRICE_CHANGE_MAX,
+    GAINER_THRESHOLD,
+    LOSER_THRESHOLD,
+    ALPHA_MAX_MCAP,
+    ALPHA_MIN_VOLUME
+)
 
 MEGA_CAPS = {
     "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX",
     "TON", "SUI", "NEAR", "PEPE", "SHIB", "LINK", "AVAX",
     "DOT", "MATIC", "UNI", "ATOM", "LTC", "ETC", "ICP", "BCH",
-    "ZEC", "XMR", "DASH", "ZEN", "BTG",  # tambah token lama
+    "ZEC", "XMR", "DASH", "ZEN", "BTG",
 }
 
 
@@ -24,23 +31,23 @@ def classify(token: Dict[str, Any]) -> Optional[str]:
     # if token.get("age_hours", 100) < 24:
     #     return "NEW"
     
-    # HOT: top 15 volume, price change under 2% (anomaly)
-    if vol_rank <= 15 and abs(chg) < 2.0:
+    # HOT: high volume, small price change (anomaly)
+    if vol_rank <= HOT_VOLUME_RANK_MAX and abs(chg) < HOT_PRICE_CHANGE_MAX:
         return "HOT"
     
-    # GAINERS: up more than 7%
-    if chg > 7:
+    # GAINERS: strong upward movement
+    if chg > GAINER_THRESHOLD:
         return "GAINERS"
     
-    # LOSERS: down more than -7%
-    if chg < -7:
+    # LOSERS: strong downward movement
+    if chg < LOSER_THRESHOLD:
         return "LOSERS"
     
-    # ALPHA: small cap (< $1M) with decent volume
-    if mcap < 1_000_000 and volume > 100_000:
+    # ALPHA: small cap with decent volume
+    if mcap < ALPHA_MAX_MCAP and volume > ALPHA_MIN_VOLUME:
         return "ALPHA"
     
-    # SIGNAL: microcap (< $300k) with any volume (disabled, perlu Bitquery)
+    # SIGNAL: microcap with any volume (disabled, needs Bitquery)
     # if mcap < 300_000 and volume > 50_000:
     #     return "SIGNAL"
     

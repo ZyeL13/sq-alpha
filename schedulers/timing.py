@@ -37,13 +37,11 @@ SESSION_BASE_DELAYS = {
 }
 
 def get_post_delay() -> int:
-    """
-    Returns randomized delay based on current session.
-    Higher weight session = shorter delay = more posts.
-    """
     session = get_current_session()
-    base = BASE_DELAYS.get(session, 90)
-    
+    base = SESSION_BASE_DELAYS.get(session, 90)
+    jitter = random.uniform(0.7, 1.3)
+    delay = int(base * jitter)
+    return max(30, min(300, delay))
     # Add random jitter ±30%
     jitter = random.uniform(0.7, 1.3)
     delay = int(base * jitter)

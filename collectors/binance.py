@@ -79,7 +79,6 @@ def fetch_new_listings() -> List[str]:
         return []
 
 _first_seen_cache = {}
-_FIRST_SEEN_FILE = "/data/data/com.termux/files/home/binance/first_seen.json"
 
 def load_first_seen_cache():
     global _first_seen_cache
