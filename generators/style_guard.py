@@ -15,6 +15,14 @@ BANNED_PHRASES = [
     "it should be noted",
     "from a technical perspective",
     "in the current market environment",
+    "under the surface",
+    "quiet divergence",
+    "signal:",
+    "layer 2:",
+    "tape says",
+    "market hasn't noticed",
+    "nobody's talking about it",
+    "something's shifting",
 ]
 
 # Too generic sentences (should trigger rewrite)

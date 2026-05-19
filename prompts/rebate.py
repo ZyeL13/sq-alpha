@@ -9,6 +9,7 @@ DO NOT:
 - show internal thoughts
 - use dramatic or mysterious language
 - overstate certainty
+- FORBIDDEN: em dash (—)
 
 Output final answer only.
 

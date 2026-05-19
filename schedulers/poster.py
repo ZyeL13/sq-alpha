@@ -22,7 +22,8 @@ def clean_for_square(text: str) -> str:
     text = text.replace('>', '')
     text = text.replace('<', '')
     text = text.replace('#', '')
-    
+    text = text.replace('—', '')
+
     # Remove multiple newlines (max 2)
     text = re.sub(r'\n{3,}', '\n\n', text)
     

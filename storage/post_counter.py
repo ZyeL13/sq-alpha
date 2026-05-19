@@ -1,32 +1,44 @@
 # storage/post_counter.py
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import POST_COUNTER_FILE, DAILY_POST_LIMIT
 
-def _get_today():
-    return datetime.now().strftime("%Y-%m-%d")
+# Reset hour in WIB (GMT+7)
+RESET_HOUR = 7  # jam 7 pagi
+
+def _get_reset_time() -> datetime:
+    """Get today's reset time (7 AM WIB)"""
+    now = datetime.now()
+    reset = datetime(now.year, now.month, now.day, RESET_HOUR, 0, 0)
+    if now >= reset:
+        return reset
+    else:
+        return reset - timedelta(days=1)
+
+def _get_today_key() -> str:
+    """Get key based on reset time (not calendar day)"""
+    reset_time = _get_reset_time()
+    return reset_time.strftime("%Y-%m-%d_%H:%M")
 
 def get_today_posts() -> int:
-    """Get number of Square posts made today"""
     if not os.path.exists(POST_COUNTER_FILE):
         return 0
     try:
         with open(POST_COUNTER_FILE, 'r') as f:
             data = json.load(f)
-            if data.get("date") == _get_today():
-                return data.get("square_count", 0)  # renamed for clarity
+            if data.get("reset_key") == _get_today_key():
+                return data.get("square_count", 0)
     except:
         pass
     return 0
 
 def increment_post_counter():
-    """Increment today's Square post counter"""
-    today = _get_today()
+    today_key = _get_today_key()
     current = get_today_posts()
     
     data = {
-        "date": today,
+        "reset_key": today_key,
         "square_count": current + 1,
         "last_updated": datetime.now().isoformat()
     }
@@ -35,17 +47,13 @@ def increment_post_counter():
     with open(POST_COUNTER_FILE, 'w') as f:
         json.dump(data, f, indent=2)
 
-def reset_counter():
-    """Force reset counter (for testing)"""
-    data = {
-        "date": _get_today(),
-        "square_count": 0,
-        "last_updated": datetime.now().isoformat()
-    }
-    os.makedirs(os.path.dirname(POST_COUNTER_FILE), exist_ok=True)
-    with open(POST_COUNTER_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
-
 def can_post() -> bool:
-    """Check if we can still post to Square today"""
     return get_today_posts() < DAILY_POST_LIMIT
+
+def get_seconds_until_reset() -> int:
+    """Seconds until next reset (7 AM WIB)"""
+    now = datetime.now()
+    reset = datetime(now.year, now.month, now.day, RESET_HOUR, 0, 0)
+    if now >= reset:
+        reset += timedelta(days=1)
+    return int((reset - now).total_seconds())

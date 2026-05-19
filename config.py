@@ -31,9 +31,9 @@ LLM_CACHE_FILE = f"{CACHE_DIR}/llm_cache.json"
 STABLE_BLACKLIST = {
     "USDC", "BUSD", "TUSD", "USDP", "DAI", "FDUSD",
     "PAX", "HUSD", "USDN", "UST", "VAI", "USDD", "FRAX",
-    "RLUSD", "USD1", "USDE", "U",
+    "RLUSD", "USD1", "USDE", "U", "XUSD",
     "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "CNY", "HKD", "SGD",
-    "DOWN", "UP", "BEAR", "BULL", "SHORT", "LONG",
+    "DOWN", "UP", "BEAR", "BULL", "SHORT", "LONG", "EURI",
 }
 
 # ========== MULTI LLM PROVIDERS ==========
@@ -43,7 +43,7 @@ LLM_PROVIDERS = {
         "api_url": "http://127.0.0.1:8402/v1/chat/completions",
         "model": "free/deepseek-v3.2",
         "max_tokens": 500,
-        "temperature": 0.55,
+        "temperature": 0.65,
         "top_p": 0.9,
         "requests_per_minute": 15,
         "enabled": True,
@@ -53,7 +53,7 @@ LLM_PROVIDERS = {
         "api_key": GROQ_API_KEY,
         "api_url": "https://api.groq.com/openai/v1/chat/completions",
         "model": "llama-3.3-70b-versatile",
-        "max_tokens": 300,
+        "max_tokens": 500,
         "temperature": 0.7,
         "top_p": 0.9,
         "requests_per_minute": 10,
@@ -64,7 +64,7 @@ LLM_PROVIDERS = {
         "api_key": OPENROUTER_API_KEY,
         "api_url": "https://openrouter.ai/api/v1/chat/completions",
         "model": "openrouter/free",
-        "max_tokens": 300,
+        "max_tokens": 500,
         "temperature": 0.8,
         "top_p": 0.9,
         "requests_per_minute": 10,
@@ -72,6 +72,9 @@ LLM_PROVIDERS = {
         "weight": 1,
     }
 }
+
+# ========== DEDUPLICATION ==========
+DEDUP_TTL_HOURS = 24  # 24 jam
 
 # Category to preferred provider
 CATEGORY_PREFERRED = {
@@ -101,10 +104,10 @@ RSS_MAX_ARTICLES_PER_SOURCE = 5
 RSS_REFRESH_INTERVAL = 300  # 5 minutes
 
 # ========== CLASSIFICATION THRESHOLDS ==========
-HOT_VOLUME_RANK_MAX = 15
-HOT_PRICE_CHANGE_MAX = 2.0
-GAINER_THRESHOLD = 7.0
-LOSER_THRESHOLD = -7.0
+HOT_VOLUME_RANK_MAX = 100
+HOT_PRICE_CHANGE_MAX = 3.0
+GAINER_THRESHOLD = 3.0
+LOSER_THRESHOLD = -3.0
 ALPHA_MAX_MCAP = 1_000_000
 ALPHA_MIN_VOLUME = 100_000
 

@@ -28,12 +28,14 @@ NEWS_REFRESH_INTERVAL = 300  # 5 minutes
 
 
 def check_shutdown():
-    """Check if we should shutdown due to daily limit"""
     global _shutdown
     if not _shutdown and not can_post():
         _shutdown = True
+        seconds_until_reset = get_seconds_until_reset()
+        hours = seconds_until_reset // 3600
+        minutes = (seconds_until_reset % 3600) // 60
         print(f"\n  🛑 DAILY LIMIT REACHED: {get_today_posts()}/{DAILY_POST_LIMIT}")
-        print("  📅 Reset at midnight")
+        print(f"  📅 Reset in {hours}h {minutes}m (7 AM WIB)")
         print("  💤 Shutting down pipeline...\n")
         time.sleep(2)
         stop_flag.set()
@@ -145,7 +147,6 @@ def processor_worker(worker_id: int):
 
 
 def poster_worker():
-    """Post to Telegram and Square"""
     print("  📤 Poster started (waiting for posts...)")
     
     while not stop_flag.is_set():
@@ -153,9 +154,8 @@ def poster_worker():
             if check_shutdown():
                 break
             
-            post, cat, sym = post_queue.get(timeout=2)
+            post, cat, sym = post_queue.get(timeout=5)
             
-            # Double-check limit before posting
             if not can_post():
                 check_shutdown()
                 break
@@ -169,7 +169,6 @@ def poster_worker():
             else:
                 print(f"  ❌ {sym} failed to post")
             
-            # Check limit again after posting
             check_shutdown()
             
             if not stop_flag.is_set():
@@ -178,8 +177,9 @@ def poster_worker():
                 time.sleep(delay)
             
         except Exception as e:
+            # Only show error if not empty queue (normal)
             if "Empty" not in str(e):
-                print(f"  ❌ Poster error: {e}")
+                print(f"  ⚠️ Poster waiting for posts... (queue empty)")
             time.sleep(1)
 
 

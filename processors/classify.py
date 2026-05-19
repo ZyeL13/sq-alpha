@@ -19,19 +19,21 @@ MEGA_CAPS = {
 
 def classify(token: Dict[str, Any]) -> Optional[str]:
     symbol = token.get("symbol", "")
-    if symbol in MEGA_CAPS:
+    price = token.get("price", 0)  # ✅ ambil price dari token
+    
+    # Skip stablecoins by price (0.99 - 1.01)
+    if price and 0.99 <= price <= 1.01:
         return None
+    
+#    if symbol in MEGA_CAPS:
+#        return None
     
     chg = token.get("price_change_percent", 0)
     vol_rank = token.get("volume_rank", 999)
     mcap = token.get("market_cap", 0)
     volume = token.get("volume_24h", 0)
     
-    # NEW category disabled (false positive too high)
-    # if token.get("age_hours", 100) < 24:
-    #     return "NEW"
-    
-    # HOT: high volume, small price change (anomaly)
+    # HOT: top volume, small price change (anomaly)
     if vol_rank <= HOT_VOLUME_RANK_MAX and abs(chg) < HOT_PRICE_CHANGE_MAX:
         return "HOT"
     
@@ -46,9 +48,5 @@ def classify(token: Dict[str, Any]) -> Optional[str]:
     # ALPHA: small cap with decent volume
     if mcap < ALPHA_MAX_MCAP and volume > ALPHA_MIN_VOLUME:
         return "ALPHA"
-    
-    # SIGNAL: microcap with any volume (disabled, needs Bitquery)
-    # if mcap < 300_000 and volume > 50_000:
-    #     return "SIGNAL"
     
     return None

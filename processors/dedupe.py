@@ -4,7 +4,8 @@ import json
 import os
 import logging
 from typing import Dict, Optional
-from config import DEDUP_FILE
+from config import DEDUP_FILE, DEDUP_TTL_HOURS
+
 
 log = logging.getLogger(__name__)
 
@@ -12,7 +13,7 @@ class TokenMemory:
     def __init__(self):
         self.posted: Dict[str, Dict] = {}
         self.storage_file = DEDUP_FILE
-        self.ttl_hours = 12
+        self.ttl_hours = DEDUP_TTL_HOURS
         self._load()
     
     def _make_key(self, symbol: str, category: str) -> str:
