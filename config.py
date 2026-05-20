@@ -1,23 +1,21 @@
-# config.py — update path section
+# config.py — Central configuration
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# API KEYS
+# ========== API KEYS ==========
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 BINANCE_SQUARE_KEY = os.getenv("BINANCE_SQUARE_KEY")
 BINANCE_SQUARE_URL = os.getenv("BINANCE_SQUARE_URL")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY")
 BITQUERY_API_KEY   = os.getenv("BITQUERY_API_KEY")
+DEEPSEEK_API_KEY   = os.getenv("DEEPSEEK_API_KEY")
 
 # ========== PATHS ==========
 BASE_DIR = "/data/data/com.termux/files/home/binance"
 CACHE_DIR = f"{BASE_DIR}/cache"
-
-# Pastikan folder cache ada
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # Cache files
@@ -27,7 +25,7 @@ FIRST_SEEN_FILE = f"{CACHE_DIR}/first_seen.json"
 COINGECKO_CACHE_FILE = f"{CACHE_DIR}/coingecko_cache.json"
 LLM_CACHE_FILE = f"{CACHE_DIR}/llm_cache.json"
 
-# BLACKLISTS
+# ========== BLACKLISTS ==========
 STABLE_BLACKLIST = {
     "USDC", "BUSD", "TUSD", "USDP", "DAI", "FDUSD",
     "PAX", "HUSD", "USDN", "UST", "VAI", "USDD", "FRAX",
@@ -42,7 +40,7 @@ LLM_PROVIDERS = {
         "api_key": "not-needed",
         "api_url": "http://127.0.0.1:8402/v1/chat/completions",
         "model": "free/deepseek-v3.2",
-        "max_tokens": 500,
+        "max_tokens": 600,
         "temperature": 0.65,
         "top_p": 0.9,
         "requests_per_minute": 15,
@@ -60,21 +58,19 @@ LLM_PROVIDERS = {
         "enabled": True,
         "weight": 1,
     },
-    "openrouter": {
-        "api_key": OPENROUTER_API_KEY,
-        "api_url": "https://openrouter.ai/api/v1/chat/completions",
-        "model": "openrouter/free",
-        "max_tokens": 500,
-        "temperature": 0.8,
+    "deepseek": {
+        "api_key": os.getenv("DEEPSEEK_API_KEY"),
+        "api_url": "https://api.deepseek.com/v1/chat/completions",  # endpoint tetap sama
+        "model": "deepseek-v4-flash",  # ← ganti dari "deepseek-chat"
+        "max_tokens": 600,
+        "temperature": 0.69,
         "top_p": 0.9,
-        "requests_per_minute": 10,
+        "thinking_mode": "non-thinking",  # tambahan untuk V4
+        "requests_per_minute": 30,
         "enabled": True,
-        "weight": 1,
-    }
+        "weight": 2,
+    },
 }
-
-# ========== DEDUPLICATION ==========
-DEDUP_TTL_HOURS = 24  # 24 jam
 
 # Category to preferred provider
 CATEGORY_PREFERRED = {
@@ -84,24 +80,26 @@ CATEGORY_PREFERRED = {
     "LOSERS": "blockrun",
 }
 
+# ========== POST MODE ==========
 POST_MODE = "rebate"
 
-# Pipeline settings
-COLLECTOR_INTERVAL = 60
-PROCESSOR_WORKERS = 1
+# ========== PIPELINE SETTINGS ==========
+COLLECTOR_INTERVAL = 60      # seconds between fetches
+PROCESSOR_WORKERS = 1        # number of processor threads
+DAILY_POST_LIMIT = 100       # Binance Square limit
 
-# Daily post limit (Binance Square = 100 posts/day)
-DAILY_POST_LIMIT = 100
+# ========== DEDUPLICATION ==========
+DEDUP_TTL_HOURS = 24         # hours before token can repeat in same category
 
 # ========== COINGECKO CONFIG ==========
 COINGECKO_ENABLED = True
-COINGECKO_CACHE_TTL = 300  # 5 minutes
-COINGECKO_RATE_LIMIT_SECONDS = 6  # 10 calls per minute
+COINGECKO_CACHE_TTL = 300    # seconds
+COINGECKO_RATE_LIMIT_SECONDS = 6
 
 # ========== RSS NEWS CONFIG ==========
 RSS_ENABLED = True
 RSS_MAX_ARTICLES_PER_SOURCE = 5
-RSS_REFRESH_INTERVAL = 300  # 5 minutes
+RSS_REFRESH_INTERVAL = 300   # seconds
 
 # ========== CLASSIFICATION THRESHOLDS ==========
 HOT_VOLUME_RANK_MAX = 100
@@ -111,7 +109,7 @@ LOSER_THRESHOLD = -3.0
 ALPHA_MAX_MCAP = 1_000_000
 ALPHA_MIN_VOLUME = 100_000
 
-# ========== SCORING WEIGHTS ==========
+# ========== SCORING WEIGHTS (unused, reserved) ==========
 MOMENTUM_WEIGHT = 0.25
 ANOMALY_WEIGHT = 0.30
 WALLET_WEIGHT = 0.20

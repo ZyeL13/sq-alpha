@@ -26,7 +26,7 @@ def is_reasoning_leak(content: str) -> bool:
     content_lower = content.lower().strip()
     
     # Check first 200 chars for rejection patterns
-    first_part = content_lower[:200]
+    first_part = content_lower[:400]
     for pattern in REJECT_PATTERNS:
         if re.search(pattern, first_part):
             return True
@@ -39,8 +39,8 @@ def is_reasoning_leak(content: str) -> bool:
     valid_starts = [
         'volume', 'price', 'the', 'a', 'this', 'that', 'these',
         'watching', 'tracking', 'worth', 'market', 'crypto', 'token',
-        'something', 'someone', 'dip', 'pump', 'dump', 'bleed',
-        'green', 'red', 'quiet', 'loud'
+        'dip', 'pump', 'dump', 'bleed',
+        'green', 'red',
     ]
     first_word = content_lower.split()[0] if content_lower.split() else ''
     if first_word in valid_starts:
@@ -70,6 +70,9 @@ def validate_post(content: str) -> tuple[bool, str]:
     # Reject if too many newlines (empty paragraphs)
     if content.count('\n\n') > 5:
         return False, "Too many line breaks"
+    
+    if content and not content.rstrip().endswith(('.', '!', '?')):
+        return False, "Post ends mid-sentence (incomplete)"
     
     return True, content
 

@@ -10,10 +10,7 @@ from config import (
 )
 
 MEGA_CAPS = {
-    "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX",
-    "TON", "SUI", "NEAR", "PEPE", "SHIB", "LINK", "AVAX",
-    "DOT", "MATIC", "UNI", "ATOM", "LTC", "ETC", "ICP", "BCH",
-    "ZEC", "XMR", "DASH", "ZEN", "BTG",
+    "BTC",
 }
 
 
@@ -25,8 +22,8 @@ def classify(token: Dict[str, Any]) -> Optional[str]:
     if price and 0.99 <= price <= 1.01:
         return None
     
-#    if symbol in MEGA_CAPS:
-#        return None
+    if symbol in MEGA_CAPS:
+        return None
     
     chg = token.get("price_change_percent", 0)
     vol_rank = token.get("volume_rank", 999)

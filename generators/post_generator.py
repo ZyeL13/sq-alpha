@@ -38,7 +38,8 @@ DATA:
 ${symbol} {chg:+.1f}% at ${price_str}, volume ${vol_m:.1f}M.{news_context}
 
 INSTRUCTIONS:
-- 3-4 sentences total, all lowercase except $SYMBOL
+- Write 3-4 COMPLETE paragraphs. Do not cut off mid-sentence.
+- Complete the post properly.
 - Use the provided HOOK as your opening line exactly as written
 - Use the provided ANGLE as your second observation, reworded slightly using the data above
 - Mention 1 related token briefly if relevant
@@ -56,13 +57,11 @@ CLOSING (end the post with this):
 TONE:
 - calm, observational, practical
 - low confidence wording: may, appears, looks, seems
-- no urgency, no hype, no predictions
 
 AVOID:
 - moon, 100x, buy now, gem alert
 - hidden, under the surface, accumulating quietly, nobody sees this
 - long explanations or technical breakdowns
-- generic filler like "the data suggests" or "worth watching closely"
 
 Write the post inside <post> tags."""
     return prompt

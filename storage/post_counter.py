@@ -52,8 +52,9 @@ def can_post() -> bool:
 
 def get_seconds_until_reset() -> int:
     """Seconds until next reset (7 AM WIB)"""
+    from datetime import datetime, timedelta
     now = datetime.now()
-    reset = datetime(now.year, now.month, now.day, RESET_HOUR, 0, 0)
+    reset = datetime(now.year, now.month, now.day, 7, 0, 0)  # 7 AM
     if now >= reset:
         reset += timedelta(days=1)
     return int((reset - now).total_seconds())

@@ -15,19 +15,19 @@ def get_current_session() -> str:
         return "night"
 
 SESSION_BASE_DELAYS = {
-    "asia": 600,
-    "europe": 600,
-    "overlap": 600,
-    "us_late": 600,
-    "night": 600,
+    "asia": 450,
+    "europe": 450,
+    "overlap": 450,
+    "us_late": 450,
+    "night": 450,
 }
 
 def get_post_delay() -> int:
     session = get_current_session()
-    base = SESSION_BASE_DELAYS.get(session, 600)
+    base = SESSION_BASE_DELAYS.get(session, 450)
     jitter = random.uniform(0.9, 1.1)
     delay = int(base * jitter)
-    return max(540, min(660, delay))
+    return max(390, min(510, delay))
 
 def get_weighted_delay() -> int:
     return get_post_delay()
