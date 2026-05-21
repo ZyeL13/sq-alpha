@@ -31,3 +31,14 @@ Thumbs.db
 # Backup
 *.bak
 *.backup
+
+# Persistent queue database
+storage/queue.db
+storage/queue.db-journal
+storage/queue.db-wal
+storage/queue.db-shm
+
+# Log files
+logs/
+*.log
+

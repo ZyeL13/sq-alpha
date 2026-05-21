@@ -15,8 +15,12 @@ from schedulers.poster import post_to_targets
 from config import PROCESSOR_WORKERS
 from schedulers.timing import get_post_delay, get_current_session
 from storage.post_counter import can_post, DAILY_POST_LIMIT, get_today_posts, get_seconds_until_reset
+import logging_config
+from storage.persistent_queue import PersistentQueue
+from monitor.cli import start_monitor
 
-data_queue = Queue(maxsize=500)
+logger = logging_config.get_logger("orchestrator")
+data_queue = PersistentQueue()
 post_queue = Queue(maxsize=100)
 stop_flag = threading.Event()
 _shutdown = False
@@ -89,10 +93,10 @@ def collector_worker():
             queued = 0
             for token in binance_tokens:
                 if not check_shutdown():
-                    data_queue.put(("binance", token))
+                    data_queue.put("binance", token)
                     queued += 1
 
-            print(f"  📡 Fetched {len(binance_tokens)} Binance tokens, queued {queued}")
+            logger.info(f"Fetched {len(binance_tokens)} Binance tokens, queued {queued}")
             print(f"  📰 News cache age: {int(time.time() - _last_news_refresh)}s, {len(_news_cache)} articles")
 
             # Clean old dedup entries
@@ -102,7 +106,7 @@ def collector_worker():
             time.sleep(60)
 
         except Exception as e:
-            print(f"  ❌ Collector error: {e}")
+            logger.error(f"Collector error: {e}")
             time.sleep(30)
 
 
@@ -117,11 +121,13 @@ def processor_worker(worker_id: int):
             if check_shutdown():
                 break
 
-            try:
-                source, raw = data_queue.get(timeout=5)
-            except Empty:
+            # Get from persistent queue (blocking with timeout)
+            item = data_queue.get(timeout=5)
+            if item is None:
                 time.sleep(1)
                 continue
+            
+            source, raw = item
 
             # Normalize
             token = normalize_token(raw, source=source)
@@ -131,15 +137,12 @@ def processor_worker(worker_id: int):
 
             if cat and can_post():
                 try:
-                    # Get hook and market cap for dedup (with safe defaults)
                     hook = get_hook(cat) or "default"
                     market_cap = token.get("market_cap", 0)
                     
-                    # Check duplicate with enhanced logic
                     if is_duplicate(token["symbol"], cat, market_cap, hook):
                         continue
                     
-                    # Pass news context to generator via token
                     if "news_catalyst" in raw:
                         token["news_catalyst"] = raw["news_catalyst"]
 
@@ -213,6 +216,10 @@ def run_orchestrator():
     print(f"📊 Daily limit: {DAILY_POST_LIMIT} posts/day")
     print(f"📰 News refresh interval: {NEWS_REFRESH_INTERVAL}s")
     print(f"{'='*50}\n")
+    
+    # Start monitor thread
+    start_time = time.time()
+    start_monitor(stop_flag, start_time)
     
     # Initialize news cache
     _last_news_refresh = 0

@@ -4,6 +4,9 @@ from llm import generate
 from prompts.rebate import REBATE_SYSTEM
 from prompts.styles import get_hook, get_angle, get_cta, get_transition
 from generators.quality_gate import validate_post, finalize_post
+import logging_config
+
+logger = logging_config.get_logger("post_generator")
 
 
 def build_prompt(token: Dict[str, Any], category: str) -> str:
@@ -91,7 +94,7 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
     # Quality validation
     valid, result = validate_post(content)
     if not valid:
-        print(f"  🚫 Quality gate REJECTED for ${token['symbol']}: {result}")
+        logger.warning(f"Quality gate REJECTED for ${token['symbol']}: {result}")
         return None
     
     content = result.strip()

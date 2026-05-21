@@ -2,6 +2,11 @@
 import sys
 import signal
 from config import POST_MODE
+import logging_config
+
+# Setup logging di awal
+logging_config.setup_logging()
+logger = logging_config.get_logger("main")
 
 print(f"📝 Post Mode: {POST_MODE}")
 

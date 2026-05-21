@@ -5,9 +5,10 @@ import requests
 from typing import List, Dict, Any
 from config import STABLE_BLACKLIST
 from config import FIRST_SEEN_FILE
+import logging_config
 
+logger = logging_config.get_logger("binance")
 _FIRST_SEEN_FILE = FIRST_SEEN_FILE
-log = logging.getLogger(__name__)
 
 def fetch_binance_tickers() -> List[Dict[str, Any]]:
     url = "https://api.binance.com/api/v3/ticker/24hr"
@@ -45,7 +46,7 @@ def fetch_binance_tickers() -> List[Dict[str, Any]]:
         for i, t in enumerate(usdt_tokens):
             t['volume_rank'] = i + 1
         
-        log.info(f"Fetched {len(usdt_tokens)} Binance tokens")
+        logger.info(f"Fetched {len(usdt_tokens)} Binance tokens")
         return usdt_tokens
     
     except Exception as e:
