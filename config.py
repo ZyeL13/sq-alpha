@@ -43,9 +43,9 @@ LLM_PROVIDERS = {
         "max_tokens": 600,
         "temperature": 0.65,
         "top_p": 0.9,
-        "requests_per_minute": 15,
+        "requests_per_minute": 10,
         "enabled": True,
-        "weight": 1,
+        "weight": 5,
     },
     "groq": {
         "api_key": GROQ_API_KEY,
@@ -56,7 +56,7 @@ LLM_PROVIDERS = {
         "top_p": 0.9,
         "requests_per_minute": 10,
         "enabled": True,
-        "weight": 1,
+        "weight": 2,
     },
     "deepseek": {
         "api_key": os.getenv("DEEPSEEK_API_KEY"),
@@ -66,18 +66,29 @@ LLM_PROVIDERS = {
         "temperature": 0.69,
         "top_p": 0.9,
         "thinking_mode": "non-thinking",  # tambahan untuk V4
-        "requests_per_minute": 30,
+        "requests_per_minute": 10,
         "enabled": True,
-        "weight": 2,
+        "weight": 1,
+    },
+    "nvidia_nim": {
+        "api_key": os.getenv("NVIDIA_NIM_API_KEY"),
+        "api_url": "https://integrate.api.nvidia.com/v1/chat/completions",
+        "model": "meta/llama-3.3-70b-instruct",
+        "max_tokens": 600,
+        "temperature": 0.69,
+        "top_p": 0.85,
+        "requests_per_minute": 10,
+        "enabled": True,
+        "weight": 3,
     },
 }
 
 # Category to preferred provider
 CATEGORY_PREFERRED = {
-    "HOT": "blockrun",
-    "ALPHA": "blockrun",
-    "GAINERS": "blockrun",
-    "LOSERS": "blockrun",
+    "HOT": "nvidia_nim",
+    "ALPHA": "nvidia_nim",
+    "GAINERS": "nvidia_nim",
+    "LOSERS": "nvidia_nim",
 }
 
 # ========== POST MODE ==========
@@ -115,3 +126,27 @@ ANOMALY_WEIGHT = 0.30
 WALLET_WEIGHT = 0.20
 LIQUIDITY_WEIGHT = 0.15
 FRESHNESS_WEIGHT = 0.10
+
+# ========== COOLDOWN CONFIG ==========
+# Market cap tiers (in USD)
+MARKET_CAP_TIERS = [
+    (10_000_000_000, 4 * 3600),   # > $10B → 4 jam
+    (1_000_000_000, 8 * 3600),    # > $1B → 8 jam
+    (0, 24 * 3600),                # default → 24 jam
+]
+
+# Specific token overrides
+TOKEN_COOLDOWN_OVERRIDES = {
+    "BTC": 4 * 3600,
+    "ETH": 4 * 3600,
+    "SOL": 6 * 3600,
+    "BNB": 6 * 3600,
+    "XRP": 8 * 3600,
+    "DOGE": 8 * 3600,
+}
+
+# Similarity threshold (0-1)
+SIMILARITY_THRESHOLD = 0.65
+
+# Daily post target (bukan limit hard)
+DAILY_POST_TARGET = 70  # dari 100

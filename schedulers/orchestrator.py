@@ -2,7 +2,7 @@
 import time
 import random
 import threading
-from queue import Queue
+from queue import Queue, Empty  # ← Tambah Empty di sini
 from datetime import datetime
 
 from collectors.binance import fetch_all_binance, fetch_new_listings
@@ -14,7 +14,7 @@ from generators.post_generator import generate_post
 from schedulers.poster import post_to_targets
 from config import PROCESSOR_WORKERS
 from schedulers.timing import get_post_delay, get_current_session
-from storage.post_counter import can_post, DAILY_POST_LIMIT, get_today_posts
+from storage.post_counter import can_post, DAILY_POST_LIMIT, get_today_posts, get_seconds_until_reset
 
 data_queue = Queue(maxsize=500)
 post_queue = Queue(maxsize=100)
@@ -110,39 +110,57 @@ def processor_worker(worker_id: int):
     """Process tokens: normalize → classify → generate"""
     print(f"  🧠 Processor {worker_id} started")
     
+    from prompts.styles import get_hook
+
     while not stop_flag.is_set():
         try:
             if check_shutdown():
                 break
-            
-            source, raw = data_queue.get(timeout=5)
-            
+
+            try:
+                source, raw = data_queue.get(timeout=5)
+            except Empty:
+                time.sleep(1)
+                continue
+
             # Normalize
             token = normalize_token(raw, source=source)
-            
+
             # Classify
             cat = classify(token)
-            
-            # Check duplicate and limit
-            if cat and not is_duplicate(token["symbol"], cat) and can_post():
-                # Pass news context to generator via token
-                if "news_catalyst" in raw:
-                    token["news_catalyst"] = raw["news_catalyst"]
-                
-                post = generate_post(token, cat, {})
-                if post:
-                    post_queue.put((post, cat, token["symbol"]))
-                    print(f"  ✍️ P{worker_id}: {token['symbol']} → {cat}")
-                    time.sleep(random.uniform(2, 5))  # Tambah delay 2-5 detik
-                else:
-                    print(f"  ⚠️ P{worker_id}: {token['symbol']} → {cat} (no post)")
-            
+
+            if cat and can_post():
+                try:
+                    # Get hook and market cap for dedup (with safe defaults)
+                    hook = get_hook(cat) or "default"
+                    market_cap = token.get("market_cap", 0)
+                    
+                    # Check duplicate with enhanced logic
+                    if is_duplicate(token["symbol"], cat, market_cap, hook):
+                        continue
+                    
+                    # Pass news context to generator via token
+                    if "news_catalyst" in raw:
+                        token["news_catalyst"] = raw["news_catalyst"]
+
+                    post = generate_post(token, cat, {})
+                    if post:
+                        post_queue.put((post, cat, token["symbol"]))
+                        mark_posted(token["symbol"], cat, hook, market_cap)
+                        print(f"  ✍️ P{worker_id}: {token['symbol']} → {cat}")
+                        time.sleep(random.uniform(2, 5))
+                    else:
+                        print(f"  ⚠️ P{worker_id}: {token['symbol']} → {cat} (no post)")
+                        
+                except Exception as inner_e:
+                    print(f"  ⚠️ P{worker_id}: Error processing {token.get('symbol', '?')}: {inner_e}")
+                    continue
+
             # Small delay
             time.sleep(random.uniform(0.5, 1))
-            
+
         except Exception as e:
-            if "Empty" not in str(e):
-                print(f"  ❌ P{worker_id} error: {e}")
+            print(f"  ❌ P{worker_id} error: {e}")
             time.sleep(1)
 
 
@@ -154,7 +172,11 @@ def poster_worker():
             if check_shutdown():
                 break
             
-            post, cat, sym = post_queue.get(timeout=5)
+            try:
+                post, cat, sym = post_queue.get(timeout=5)
+            except Empty:
+                time.sleep(1)
+                continue
             
             if not can_post():
                 check_shutdown()
@@ -175,11 +197,9 @@ def poster_worker():
                 delay = get_post_delay()
                 print(f"  ⏳ Next post in {delay}s (session: {get_current_session()})")
                 time.sleep(delay)
-            
+        
         except Exception as e:
-            # Only show error if not empty queue (normal)
-            if "Empty" not in str(e):
-                print(f"  ⚠️ Poster waiting for posts... (queue empty)")
+            print(f"  ❌ Poster error: {e}")
             time.sleep(1)
 
 

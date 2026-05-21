@@ -7,34 +7,24 @@ import random
 
 HOOKS = {
     "HOT": [
-        "volume increased while price stayed flat.",
-        "activity picked up around current levels.",
-        "more volume than the price move suggests.",
-        "price held range, volume kept coming in.",
-        "volume picked up without a clear catalyst.",
-        "activity higher than recent sessions.",
-        "volume staying elevated at current levels.",
-        "trade activity increased this session.",
+        "volume increased faster than price moved.",
+        "activity stayed elevated throughout the session.",
+        "price stayed relatively stable despite heavier trading.",
+        "participation increased without a major breakout.",
+        "volume remained active near current levels.",
     ],
     "GAINERS": [
-        "price moved higher, volume stayed active.",
-        "stronger move than recent sessions.",
-        "momentum held through the session.",
-        "price moved and held the gain.",
-        "clean move with participation.",
-        "volume confirmed the move up.",
-        "buyers stayed active after the initial push.",
-        "price moved, interest didn't drop off.",
+        "price pushed higher and volume stayed active afterward.",
+        "most short-term spikes lose participation quickly. this one didn't.",
+        "buyers stayed involved after the initial move.",
+        "the move extended without volume fading immediately.",
+        "price moved quickly, but activity stayed elevated.",
     ],
     "LOSERS": [
-        "price pulled back with volume behind it.",
-        "selling pressure remained through the session.",
-        "price declined steadily this session.",
-        "momentum weakened into the close.",
-        "consistent selling pressure today.",
-        "price dropped with active participation.",
-        "volume followed the move down.",
-        "decline continued without a clear bounce.",
+        "selling pressure stayed active through the session.",
+        "price continued lower without much relief buying.",
+        "the pullback extended with steady volume behind it.",
+        "buyers haven't stepped in aggressively yet.",
     ],
     "ALPHA": [
         "low volume name seeing more activity than usual.",
@@ -57,14 +47,10 @@ HOOKS = {
         "no prior reference points yet.",
     ],
     "SIGNAL": [
-        "volume increased ahead of any price move.",
-        "activity picked up before price responded.",
-        "volume behavior changed before price did.",
-        "trade flow increased without a visible reason.",
-        "activity up slightly, price hasn't moved yet.",
-        "more volume than expected for a quiet session.",
-        "volume shifted before chart structure changed.",
-        "early activity increase, price still flat.",
+        "activity picked up before price reacted meaningfully.",
+        "volume started increasing ahead of the move.",
+        "participation changed before the chart did.",
+        "trading activity increased around a quiet range.",
     ],
 }
 
@@ -83,11 +69,10 @@ ANGLES = {
         "flow looks stronger than the move warrants.",
     ],
     "accumulation": [
-        "buyers appear active near current price.",
-        "dips seem to be getting absorbed.",
-        "demand looks steady at these levels.",
-        "price is holding while buying activity continues.",
-        "consistent buying activity near support, still early.",
+        "buying activity stayed consistent after the initial move.",
+        "dips continued finding buyers during the session.",
+        "volume remained active even after the first breakout.",
+        "buyers continued showing up near current levels.",
     ],
     "relative_strength": [
         "holding better than similar tokens this session.",
@@ -118,18 +103,16 @@ ANGLES = {
         "fewer sellers appear to be showing up at these levels.",
     ],
     "breakout_watch": [
-        "price is pressing against a recent level.",
-        "range looks compressed over the last few sessions.",
-        "consolidation near a key area, still early.",
-        "price is sitting near a decision point.",
-        "range tightening — may resolve soon.",
+        "price is approaching a level that previously rejected momentum.",
+        "the current range may be close to resolving.",
+        "recent sessions have compressed into a tighter range.",
+        "momentum is building near a recent breakout area.",
     ],
     "divergence": [
-        "volume and price appear to be moving differently.",
-        "price looks stable but volume is increasing.",
-        "participation seems inconsistent with the price action.",
-        "volume behavior doesn't fully match the chart.",
-        "price and activity may not be aligned.",
+        "price and participation are moving at different speeds.",
+        "activity looks stronger than the chart alone suggests.",
+        "volume expanded more aggressively than price.",
+        "participation increased without a full breakout yet.",
     ],
 }
 
@@ -162,14 +145,11 @@ TRANSITIONS = [
 # ─────────────────────────────────────────────
 
 CLOSERS = [
-    "still early.",
-    "needs follow-through.",
-    "worth monitoring from here.",
-    "too early to confirm.",
-    "watching for continuation.",
-    "no clear direction yet.",
-    "will need more sessions to confirm.",
-    "early stage — monitoring.",
+    "the next few sessions should clarify the move.",
+    "follow-through matters from here.",
+    "still needs confirmation from price action.",
+    "worth watching if activity stays elevated.",
+    "momentum looks active for now.",
 ]
 
 # ─────────────────────────────────────────────

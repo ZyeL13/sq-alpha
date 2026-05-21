@@ -32,40 +32,54 @@ def build_prompt(token: Dict[str, Any], category: str) -> str:
 
     prompt = f"""You are writing a short market observation post for Binance Square.
 
-GOAL: Make readers curious enough to check ${symbol}'s chart or token page.
+GOAL: Make the reader curious enough to check ${symbol}'s chart.
 
 DATA:
-${symbol} {chg:+.1f}% at ${price_str}, volume ${vol_m:.1f}M.{news_context}
+${symbol} {chg:+.1f}% | price: ${price_str} | volume: ${vol_m:.1f}M{news_context}
 
-INSTRUCTIONS:
-- Write 3-4 COMPLETE paragraphs. Do not cut off mid-sentence.
-- Complete the post properly.
-- Use the provided HOOK as your opening line exactly as written
-- Use the provided ANGLE as your second observation, reworded slightly using the data above
-- Mention 1 related token briefly if relevant
-- End with the provided CLOSING
+FORMAT:
+- Write 4-7 short paragraphs.
+- Separate EVERY paragraph with ONE blank line.
+- Never write large text blocks.
+- Some paragraphs may contain only one sentence.
+- The post should feel readable for around 1-2 minutes.
+- Start directly with the HOOK below.
+- End with the CLOSING line below, verbatim.
 
-HOOK (use this as your first sentence):
-"{hook}"
+HOOK — copy this as your FIRST LINE, word for word:
+{hook}
 
-ANGLE (use this as your core observation):
-"{angle}"
+ANGLE — use this as the basis for your second paragraph, reworded with the data above:
+{angle}
 
-CLOSING (end the post with this):
-"{closing_line}"
+CLOSING — this is your last line, copy exactly:
+{closing_line}
 
-TONE:
-- calm, observational, practical
-- low confidence wording: may, appears, looks, seems
+RULES:
+- Lowercase everything except ${symbol} and other $TOKENS
+- Use hedged language: may, appears, looks, seems
+- Observable facts only. No predictions, no opinions.
+- Do not mention related tokens unless directly relevant to the data.
+- $SYMBOL and all token tickers MUST be uppercase: $XRP not $xrp, $BTC not $btc
+- Volume format: use capital M, $106.0M not $106.0m
+- Expand naturally from the provided data.
+- Explain why the behavior may matter.
+- Compare the move to normal market behavior when relevant.
+- Mild interpretation is allowed.
+- The post should feel like a trader thinking through the market in public.
+- Avoid dramatic or mysterious language.
+- Avoid sounding like a template or summary bot.
+- Insert a blank line between every paragraph.
+- Keep visual rhythm clean and easy to scan.
+- Avoid dense walls of text.
 
-AVOID:
-- moon, 100x, buy now, gem alert
-- hidden, under the surface, accumulating quietly, nobody sees this
-- long explanations or technical breakdowns
+FORBIDDEN PHRASES:
+- "i'm curious", "it will be interesting", "in the coming days", "it looks like"
+- "one might expect", "it's worth noting", "as one might"
+- "i", "we", "you" (no first or second person)
 
-Write the post inside <post> tags."""
+Write the post inside <post> tags. Nothing outside the tags."""
     return prompt
-
 
 def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]) -> Optional[str]:
     prompt = build_prompt(token, category)
