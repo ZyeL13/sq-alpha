@@ -10,7 +10,7 @@ __pycache__/
 .env.local
 .env.*.local
 
-# Cache folder (semua file json di dalamnya)
+# Cache folder
 cache/*.json
 !cache/.gitkeep
 
@@ -32,13 +32,12 @@ Thumbs.db
 *.bak
 *.backup
 
-# Persistent queue database
+# Database files (persistent queues)
 storage/queue.db
-storage/queue.db-journal
-storage/queue.db-wal
-storage/queue.db-shm
+storage/queue.db-*
+storage/scheduled_queue.db
+storage/scheduled_queue.db-*
 
 # Log files
 logs/
 *.log
-

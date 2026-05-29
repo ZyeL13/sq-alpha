@@ -17,31 +17,46 @@ from schedulers.timing import get_post_delay, get_current_session, get_dynamic_p
 from storage.post_counter import can_post, DAILY_POST_LIMIT, get_today_posts, get_seconds_until_reset
 import logging_config
 from storage.persistent_queue import PersistentQueue
+from storage.scheduled_post_queue import ScheduledPostQueue
 
 logger = logging_config.get_logger("orchestrator")
 data_queue = PersistentQueue()
-post_queue = Queue(maxsize=100)
 stop_flag = threading.Event()
 _shutdown = False
 
 # News cache
 _news_cache = []
 _last_news_refresh = 0
-NEWS_REFRESH_INTERVAL = 300  # 5 minutes
+NEWS_REFRESH_INTERVAL = 600  # 10 minutes
 
 
-def check_shutdown():
+def check_and_sleep():
+    """Check if daily limit reached, sleep until reset instead of shutdown"""
     global _shutdown
     if not _shutdown and not can_post():
         _shutdown = True
         seconds_until_reset = get_seconds_until_reset()
         hours = seconds_until_reset // 3600
         minutes = (seconds_until_reset % 3600) // 60
+        
         print(f"\n  🛑 DAILY LIMIT REACHED: {get_today_posts()}/{DAILY_POST_LIMIT}")
         print(f"  📅 Reset in {hours}h {minutes}m (7 AM WIB)")
-        print("  💤 Shutting down pipeline...\n")
-        time.sleep(2)
-        stop_flag.set()
+        print(f"  💤 Sleeping {hours}h {minutes}m until reset...\n")
+        
+        # Sleep until reset (7 AM WIB)
+        time.sleep(seconds_until_reset)
+        
+        # Reset setelah bangun
+        from storage.post_counter import reset_counter
+        reset_counter()
+        
+        # Reset shutdown flag
+        _shutdown = False
+        print(f"  🌅 New day! Resuming pipeline...\n")
+        
+        # Reset stop_flag agar workers bisa lanjut
+        stop_flag.clear()
+    
     return _shutdown
 
 
@@ -63,45 +78,32 @@ def collector_worker():
     
     while not stop_flag.is_set():
         try:
-            if check_shutdown():
+            if check_and_sleep():
                 break
 
-            # Refresh news cache periodically
             refresh_news_cache()
-
-            # Fetch Binance tokens
             binance_tokens = fetch_all_binance(limit=200)
-
-            # Fetch new listings for age calculation
             new_listings = fetch_new_listings()
 
-            # Add age_hours and news context to tokens
             for token in binance_tokens:
                 full_symbol = token.get("full_symbol", "")
                 symbol = token.get("symbol", "")
-                
-                # Age calculation
                 token["age_hours"] = 12 if full_symbol in new_listings else 100
                 
-                # Add news catalyst summary if available
                 catalyst = get_catalyst_summary(symbol, _news_cache)
                 if catalyst:
                     token["news_catalyst"] = catalyst
 
-            # Queue tokens
             queued = 0
             for token in binance_tokens:
-                if not check_shutdown():
+                if not check_and_sleep():
                     data_queue.put("binance", token)
                     queued += 1
 
             logger.info(f"Fetched {len(binance_tokens)} Binance tokens, queued {queued}")
             print(f"  📰 News cache age: {int(time.time() - _last_news_refresh)}s, {len(_news_cache)} articles")
 
-            # Clean old dedup entries
             clear_old_entries()
-
-            # Wait before next fetch
             time.sleep(60)
 
         except Exception as e:
@@ -110,30 +112,26 @@ def collector_worker():
 
 
 def processor_worker(worker_id: int):
-    """Process tokens: normalize → classify → generate"""
+    """Process tokens: normalize → classify → generate → schedule post"""
     print(f"  🧠 Processor {worker_id} started")
     
     from prompts.styles import get_hook
-
+    scheduled_queue = ScheduledPostQueue()
+    
     while not stop_flag.is_set():
         try:
-            if check_shutdown():
+            if check_and_sleep():
                 break
-
-            # Get from persistent queue (blocking with timeout)
+            
             item = data_queue.get(timeout=5)
             if item is None:
                 time.sleep(1)
                 continue
             
             source, raw = item
-
-            # Normalize
             token = normalize_token(raw, source=source)
-
-            # Classify
             cat = classify(token)
-
+            
             if cat and can_post():
                 try:
                     hook = get_hook(cat) or "default"
@@ -144,12 +142,40 @@ def processor_worker(worker_id: int):
                     
                     if "news_catalyst" in raw:
                         token["news_catalyst"] = raw["news_catalyst"]
-
+                    
                     post = generate_post(token, cat, {})
                     if post:
-                        post_queue.put((post, cat, token["symbol"]))
+                        current_time = time.time()
+                        scheduled_queue = ScheduledPostQueue()
+    
+                        # Get LAST post time (not next)
+                        last_time = scheduled_queue.get_last_post_time()
+    
+                        if last_time and last_time > current_time:
+                            # Queue has future posts, schedule after the last one + delay
+                            scheduled_time = last_time + get_post_delay()
+                            print(f"  📅 Last post at {last_time:.0f}, scheduling +{get_post_delay()}s")
+                        else:
+                            # Queue empty or all posts past, schedule now + delay
+                            scheduled_time = current_time + get_post_delay()
+                            print(f"  📅 Queue empty, scheduling in {get_post_delay()}s")
+    
+                        session = get_current_session()
+    
+                        scheduled_queue.add_post(
+                            post=post,
+                            category=cat,
+                            symbol=token["symbol"],
+                            scheduled_time=scheduled_time,
+                            hook=hook,
+                            session=session,
+                            provider="blockrun"
+                        )
+    
                         mark_posted(token["symbol"], cat, hook, market_cap)
-                        print(f"  ✍️ P{worker_id}: {token['symbol']} → {cat}")
+    
+                        wait_min = (scheduled_time - current_time) / 60
+                        print(f"  ✍️ P{worker_id}: {token['symbol']} → {cat} scheduled in {wait_min:.1f} min")
                         time.sleep(random.uniform(2, 5))
                     else:
                         print(f"  ⚠️ P{worker_id}: {token['symbol']} → {cat} (no post)")
@@ -157,52 +183,66 @@ def processor_worker(worker_id: int):
                 except Exception as inner_e:
                     print(f"  ⚠️ P{worker_id}: Error processing {token.get('symbol', '?')}: {inner_e}")
                     continue
-
-            # Small delay
+            
             time.sleep(random.uniform(0.5, 1))
-
+            
         except Exception as e:
             print(f"  ❌ P{worker_id} error: {e}")
             time.sleep(1)
 
 
 def poster_worker():
-    print("  📤 Poster started (waiting for posts...)")
+    """Post scheduled posts when they are due"""
+    print("  📤 Poster started (waiting for scheduled posts...)")
+    
+    scheduled_queue = ScheduledPostQueue()
     
     while not stop_flag.is_set():
         try:
-            if check_shutdown():
+            if check_and_sleep():
                 break
             
-            try:
-                post, cat, sym = post_queue.get(timeout=5)
-            except Empty:
-                time.sleep(1)
+            due_posts = scheduled_queue.get_due_posts(limit=1)
+            
+            if not due_posts:
+                next_time = scheduled_queue.get_next_post_time()
+                if next_time:
+                    wait_time = max(1, next_time - time.time())
+                    print(f"  ⏳ Next scheduled post in {wait_time:.0f}s")
+                    time.sleep(min(wait_time, 30))
+                else:
+                    time.sleep(10)
                 continue
             
-            if not can_post():
-                check_shutdown()
-                break
+            for post_id, post, cat, sym, hook, session, provider in due_posts:
+                if not can_post():
+                    check_and_sleep()
+                    break
+                
+                print(f"  📝 Posting {sym} as {cat}...")
+                success = post_to_targets(
+                    content=post,
+                    category=cat,
+                    symbol=sym,
+                    hook=hook,
+                    session=session,
+                    llm_provider=provider
+                )
+                
+                if success:
+                    mark_posted(sym, cat)
+                    print(f"  ✅ {sym} posted")
+                else:
+                    print(f"  ❌ {sym} failed to post")
+                
+                scheduled_queue.remove_post(post_id)
+                check_and_sleep()
             
-            print(f"  📝 Posting {sym} as {cat}...")
-            success = post_to_targets(post, cat)
+            time.sleep(2)
             
-            if success:
-                mark_posted(sym, cat)
-                print(f"  ✅ {sym} posted")
-            else:
-                print(f"  ❌ {sym} failed to post")
-            
-            check_shutdown()
-            
-            if not stop_flag.is_set():
-                delay = get_post_delay()
-                print(f"  ⏳ Next post in {delay}s (session: {get_current_session()})")
-                time.sleep(delay)
-        
         except Exception as e:
             print(f"  ❌ Poster error: {e}")
-            time.sleep(1)
+            time.sleep(5)
 
 
 def run_orchestrator():
@@ -215,10 +255,6 @@ def run_orchestrator():
     print(f"📊 Daily limit: {DAILY_POST_LIMIT} posts/day")
     print(f"📰 News refresh interval: {NEWS_REFRESH_INTERVAL}s")
     print(f"{'='*50}\n")
-    
-    # Start monitor thread
-    start_time = time.time()
-#    start_monitor(stop_flag, start_time)
     
     # Initialize news cache
     _last_news_refresh = 0

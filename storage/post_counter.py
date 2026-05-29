@@ -58,3 +58,16 @@ def get_seconds_until_reset() -> int:
     if now >= reset:
         reset += timedelta(days=1)
     return int((reset - now).total_seconds())
+
+def reset_counter():
+    """Force reset counter to zero (called after sleep)"""
+    today_key = _get_today_key()
+    data = {
+        "reset_key": today_key,
+        "square_count": 0,
+        "last_updated": datetime.now().isoformat()
+    }
+    os.makedirs(os.path.dirname(POST_COUNTER_FILE), exist_ok=True)
+    with open(POST_COUNTER_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+    print("  🔄 Counter reset to 0")

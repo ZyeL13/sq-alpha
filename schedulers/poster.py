@@ -8,6 +8,7 @@ import os
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, BINANCE_SQUARE_KEY, BINANCE_SQUARE_URL
 from storage.post_counter import can_post, increment_post_counter, get_today_posts, DAILY_POST_LIMIT
 from utils.performance_logger import log_post, update_metrics, get_stats
+from storage.scheduled_post_queue import ScheduledPostQueue
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -137,7 +138,7 @@ def post_to_square(content):
         return False
 
 
-def post_to_targets(content, category):
+def post_to_targets(content, category, symbol=None, hook=None, angle=None, session=None, llm_provider=None):
     """
     Post content to all platforms.
     Counter ONLY increments if Square post succeeds.
@@ -159,22 +160,30 @@ def post_to_targets(content, category):
     time.sleep(1)
     
     # Post to Square (counts toward limit)
+    square_success = False
     if BINANCE_SQUARE_KEY and BINANCE_SQUARE_URL:
-        success = post_to_square(content)
-        if success:
-            # Log performance data
-            log_post(
-                symbol=symbol or "unknown",
-                category=category,
-                hook=hook or "",
-                angle=angle or "",
-                session=session or "unknown",
-                post_content=content,
-                llm_provider=llm_provider or "unknown",
-                post_id=f"{symbol}_{int(time.time())}"
-            )
-
-            return success
+        square_success = post_to_square(content)
+        if square_success:
+            print("  ✅ Square posted (COUNTED)")
+            increment_post_counter()
+            
+            # Log performance data if symbol provided
+            if symbol:
+                try:
+                    log_post(
+                        symbol=symbol,
+                        category=category,
+                        hook=hook or "",
+                        angle=angle or "",
+                        session=session or "",
+                        post_content=content,
+                        llm_provider=llm_provider or "",
+                        post_id=f"{symbol}_{int(time.time())}"
+                    )
+                except Exception as e:
+                    print(f"  ⚠️ Failed to log post: {e}")
+            
+            return True
         else:
             print("  ❌ Square failed (not counted)")
             return False

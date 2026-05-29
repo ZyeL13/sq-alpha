@@ -41,7 +41,7 @@ HOOKS = {
         "first sessions are live.",
         "price discovery is still in early stages.",
         "initial volume is establishing the baseline.",
-        "new listing — watching early session behavior.",
+        "new listing, watching early session behavior.",
         "range is still being established.",
         "early sessions are still active.",
         "no prior reference points yet.",
@@ -71,7 +71,7 @@ HOOKS_COMMENTARY = {
         "one of those days where the data and the narrative don't match.",
         "volume says one thing, price says another.",
         "not obvious which way this resolves.",
-        "the move looks real — follow-through is the question.",
+        "the move looks real, follow-through is the question.",
     ],
 }
 
@@ -215,7 +215,7 @@ def get_comparison_hook(symbol_a: str, chg_a: float, symbol_b: str, chg_b: float
     templates = [
         f"${symbol_a} +{chg_a:.1f}% while ${symbol_b} moved only +{chg_b:.1f}%.",
         f"${symbol_a} outperforming ${symbol_b} by a wide margin today.",
-        f"${symbol_a} and ${symbol_b} diverging — same sector, different tape.",
+        f"${symbol_a} and ${symbol_b} diverging, same sector, different tape.",
         f"${symbol_a} moved. ${symbol_b} didn't follow.",
     ]
     return random.choice(templates)
