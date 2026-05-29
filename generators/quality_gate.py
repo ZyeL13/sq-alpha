@@ -49,6 +49,9 @@ def is_reasoning_leak(content: str) -> bool:
         # observation openers
         'holding', 'declining', 'rising', 'down', 'up', 'mixed',
         'consistent', 'notable', 'unusual', 'relative',
+        'bid', 'ask', 'spread', 'order', 'book', 'depth',
+        'resistance', 'support', 'break', 'reject', 'test',
+        'entry', 'exit', 'position', 'size', 'risk',
     ]
 
     first_word = content_lower.split()[0] if content_lower.split() else ''
@@ -67,19 +70,22 @@ def validate_post(content: str) -> tuple[bool, str]:
     if not content:
         return False, "Empty content"
 
+    # Keep reasoning leak check (most important)
     if is_reasoning_leak(content):
         return False, "Reasoning leak detected"
 
-    if len(content) < 30:
+    # Minimum length (relaxed)
+    if len(content) < 250:
         return False, "Content too short"
 
-    if content.count('\n\n') > 5:
-        return False, "Too many line breaks"
+    # Relax: allow more line breaks (post panjang bisa punya banyak)
+    # if content.count('\n\n') > 5:
+    #     return False, "Too many line breaks"  # DISABLED
 
-    # Strip whitespace and newlines before checking ending punctuation
-    cleaned = content.rstrip('\n').strip()
-    if cleaned and cleaned[-1] not in '.!?':
-        return False, "Post ends mid-sentence (incomplete)"
+    # Relax: allow posts without perfect punctuation
+    # cleaned = content.rstrip('\n').strip()
+    # if cleaned and cleaned[-1] not in '.!?':
+    #     return False, "Post ends mid-sentence (incomplete)"  # DISABLED
 
     return True, content
 

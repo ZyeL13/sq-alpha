@@ -1,4 +1,4 @@
-# config.py — Central configuration
+# config.py — Centraxl configuration
 import os
 from dotenv import load_dotenv
 
@@ -31,7 +31,7 @@ STABLE_BLACKLIST = {
     "PAX", "HUSD", "USDN", "UST", "VAI", "USDD", "FRAX",
     "RLUSD", "USD1", "USDE", "U", "XUSD",
     "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "CNY", "HKD", "SGD",
-    "DOWN", "UP", "BEAR", "BULL", "SHORT", "LONG", "EURI",
+    "DOWN", "UP", "BEAR", "BULL", "SHORT", "LONG", "EURI", "WBTC",
 }
 
 # ========== MULTI LLM PROVIDERS ==========
@@ -39,10 +39,10 @@ LLM_PROVIDERS = {
     "blockrun": {
         "api_key": "not-needed",
         "api_url": "http://127.0.0.1:8402/v1/chat/completions",
-        "model": "free/deepseek-v3.2",
-        "max_tokens": 600,
+        "model": "free/mistral-large-3-675b",
+        "max_tokens": 666,
         "temperature": 0.65,
-        "top_p": 0.9,
+        "top_p": 0.85,
         "requests_per_minute": 10,
         "enabled": True,
         "weight": 5,
@@ -100,7 +100,7 @@ PROCESSOR_WORKERS = 1        # number of processor threads
 DAILY_POST_LIMIT = 100       # Binance Square limit
 
 # ========== DEDUPLICATION ==========
-DEDUP_TTL_HOURS = 24         # hours before token can repeat in same category
+DEDUP_TTL_HOURS = 12         # hours before token can repeat in same category
 
 # ========== COINGECKO CONFIG ==========
 COINGECKO_ENABLED = True
@@ -130,9 +130,10 @@ FRESHNESS_WEIGHT = 0.10
 # ========== COOLDOWN CONFIG ==========
 # Market cap tiers (in USD)
 MARKET_CAP_TIERS = [
-    (10_000_000_000, 4 * 3600),   # > $10B → 4 jam
-    (1_000_000_000, 8 * 3600),    # > $1B → 8 jam
-    (0, 24 * 3600),                # default → 24 jam
+    (10_000_000_000, 3 * 3600),   # 3 jam
+    (1_000_000_000, 5 * 3600),    # 5 jam
+    (100_000_000, 8 * 3600),      # 8 jam
+    (0, 12 * 3600),               # 12 jam
 ]
 
 # Specific token overrides

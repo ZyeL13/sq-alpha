@@ -2,7 +2,7 @@
 import time
 import random
 import threading
-from queue import Queue, Empty  # ← Tambah Empty di sini
+from queue import Queue, Empty
 from datetime import datetime
 
 from collectors.binance import fetch_all_binance, fetch_new_listings
@@ -13,11 +13,10 @@ from processors.dedupe import is_duplicate, mark_posted, clear_old_entries
 from generators.post_generator import generate_post
 from schedulers.poster import post_to_targets
 from config import PROCESSOR_WORKERS
-from schedulers.timing import get_post_delay, get_current_session
+from schedulers.timing import get_post_delay, get_current_session, get_dynamic_post_limit
 from storage.post_counter import can_post, DAILY_POST_LIMIT, get_today_posts, get_seconds_until_reset
 import logging_config
 from storage.persistent_queue import PersistentQueue
-from monitor.cli import start_monitor
 
 logger = logging_config.get_logger("orchestrator")
 data_queue = PersistentQueue()
@@ -219,7 +218,7 @@ def run_orchestrator():
     
     # Start monitor thread
     start_time = time.time()
-    start_monitor(stop_flag, start_time)
+#    start_monitor(stop_flag, start_time)
     
     # Initialize news cache
     _last_news_refresh = 0

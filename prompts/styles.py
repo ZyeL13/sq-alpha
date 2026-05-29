@@ -54,6 +54,27 @@ HOOKS = {
     ],
 }
 
+HOOKS_COMMENTARY = {
+    "COMMENTARY": [
+        "semis diverging while mega-cap tech cools.",
+        "crypto volume up, price reaction mixed.",
+        "rotation looks sector-specific, not broad.",
+        "macro data landed, market response was muted.",
+        "correlation between BTC and altcoins breaking down this session.",
+        "risk appetite looks selective today.",
+        "vol up across the board but leaders and laggards swapped.",
+        "this kind of divergence usually resolves within a few sessions.",
+    ],
+    "OPINION": [
+        "worth asking: rotation or temporary noise?",
+        "is this a sector shift or just a noisy session?",
+        "one of those days where the data and the narrative don't match.",
+        "volume says one thing, price says another.",
+        "not obvious which way this resolves.",
+        "the move looks real — follow-through is the question.",
+    ],
+}
+
 # ─────────────────────────────────────────────
 # ANGLES
 # Observable interpretation only. Low-confidence language required.
@@ -116,6 +137,15 @@ ANGLES = {
     ],
 }
 
+ANGLES_COMPARISON = {
+    "comparison": [
+        "$TOKEN_A up {chg_a}% while $TOKEN_B moved only {chg_b}%.",
+        "$TOKEN_A outperforming $TOKEN_B by a notable margin this session.",
+        "$TOKEN_A volume significantly higher than $TOKEN_B despite similar price moves.",
+        "momentum in $TOKEN_A appears stronger than $TOKEN_B so far.",
+        "$TOKEN_A holding gains while $TOKEN_B pulled back.",
+    ],
+}
 # ─────────────────────────────────────────────
 # CTA
 # Click encouragement only. No hype, no calls.
@@ -152,6 +182,7 @@ CLOSERS = [
     "momentum looks active for now.",
 ]
 
+ANGLES.update(ANGLES_COMPARISON)
 # ─────────────────────────────────────────────
 # GETTERS
 # ─────────────────────────────────────────────
@@ -178,3 +209,13 @@ def get_closer(probability: float = 0.3) -> str:
         return ""
     return random.choice(CLOSERS)
 
+# Helper untuk comparison posts (butuh 2 tokens)
+def get_comparison_hook(symbol_a: str, chg_a: float, symbol_b: str, chg_b: float) -> str:
+    import random
+    templates = [
+        f"${symbol_a} +{chg_a:.1f}% while ${symbol_b} moved only +{chg_b:.1f}%.",
+        f"${symbol_a} outperforming ${symbol_b} by a wide margin today.",
+        f"${symbol_a} and ${symbol_b} diverging — same sector, different tape.",
+        f"${symbol_a} moved. ${symbol_b} didn't follow.",
+    ]
+    return random.choice(templates)
