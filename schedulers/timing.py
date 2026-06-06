@@ -19,11 +19,11 @@ def get_current_session() -> str:
 
 # Base delays in seconds
 SESSION_BASE_DELAYS = {
-    "asia": 900,     # 15 menit
-    "europe": 900,   # 15 menit
-    "overlap": 900,  # 15 menit
-    "us_late": 900,  # 15 menit
-    "night": 900,    # 15 menit
+    "asia": 600,     # 10 menit
+    "europe": 600,   # 10 menit
+    "overlap": 600,  # 10 menit
+    "us_late": 600,  # 10 menit
+    "night": 600,    # 10 menit
 }
 
 def get_post_delay() -> int:
@@ -32,7 +32,7 @@ def get_post_delay() -> int:
     base = SESSION_BASE_DELAYS.get(session, 900)
     jitter = random.uniform(0.85, 1.15)  # ±15% jitter
     delay = int(base * jitter)
-    return max(765, min(1035, delay))  # between 765-1035 seconds
+    return max(450, min(750, delay))  # between 450-750 seconds
 
 def get_dynamic_post_limit() -> int:
     """Get post limit based on current session (for soft limiting)"""

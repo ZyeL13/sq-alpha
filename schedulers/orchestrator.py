@@ -2,8 +2,9 @@
 import time
 import random
 import threading
-from queue import Queue, Empty
+from queue import Empty
 from datetime import datetime
+from collections import deque
 
 from collectors.binance import fetch_all_binance, fetch_new_listings
 from collectors.rss_news import fetch_all_news, get_catalyst_summary
@@ -13,7 +14,7 @@ from processors.dedupe import is_duplicate, mark_posted, clear_old_entries
 from generators.post_generator import generate_post
 from schedulers.poster import post_to_targets
 from config import PROCESSOR_WORKERS
-from schedulers.timing import get_post_delay, get_current_session, get_dynamic_post_limit
+from schedulers.timing import get_post_delay, get_current_session
 from storage.post_counter import can_post, DAILY_POST_LIMIT, get_today_posts, get_seconds_until_reset
 import logging_config
 from storage.persistent_queue import PersistentQueue
@@ -24,10 +25,23 @@ data_queue = PersistentQueue()
 stop_flag = threading.Event()
 _shutdown = False
 
+# Rate limiter untuk poster
+_post_times = deque(maxlen=10)
+
 # News cache
 _news_cache = []
 _last_news_refresh = 0
 NEWS_REFRESH_INTERVAL = 600  # 10 minutes
+
+
+def can_post_now(min_interval: int = 10):
+    """Check if we can post now (min_interval seconds between posts)"""
+    now = time.time()
+    if _post_times:
+        last_post = _post_times[-1]
+        if now - last_post < min_interval:
+            return False, min_interval - (now - last_post)
+    return True, 0
 
 
 def check_and_sleep():
@@ -43,18 +57,13 @@ def check_and_sleep():
         print(f"  📅 Reset in {hours}h {minutes}m (7 AM WIB)")
         print(f"  💤 Sleeping {hours}h {minutes}m until reset...\n")
         
-        # Sleep until reset (7 AM WIB)
         time.sleep(seconds_until_reset)
         
-        # Reset setelah bangun
         from storage.post_counter import reset_counter
         reset_counter()
         
-        # Reset shutdown flag
         _shutdown = False
         print(f"  🌅 New day! Resuming pipeline...\n")
-        
-        # Reset stop_flag agar workers bisa lanjut
         stop_flag.clear()
     
     return _shutdown
@@ -116,7 +125,6 @@ def processor_worker(worker_id: int):
     print(f"  🧠 Processor {worker_id} started")
     
     from prompts.styles import get_hook
-    scheduled_queue = ScheduledPostQueue()
     
     while not stop_flag.is_set():
         try:
@@ -147,21 +155,18 @@ def processor_worker(worker_id: int):
                     if post:
                         current_time = time.time()
                         scheduled_queue = ScheduledPostQueue()
-    
-                        # Get LAST post time (not next)
+                        
                         last_time = scheduled_queue.get_last_post_time()
-    
+                        
                         if last_time and last_time > current_time:
-                            # Queue has future posts, schedule after the last one + delay
                             scheduled_time = last_time + get_post_delay()
                             print(f"  📅 Last post at {last_time:.0f}, scheduling +{get_post_delay()}s")
                         else:
-                            # Queue empty or all posts past, schedule now + delay
                             scheduled_time = current_time + get_post_delay()
                             print(f"  📅 Queue empty, scheduling in {get_post_delay()}s")
-    
+                        
                         session = get_current_session()
-    
+                        
                         scheduled_queue.add_post(
                             post=post,
                             category=cat,
@@ -171,9 +176,9 @@ def processor_worker(worker_id: int):
                             session=session,
                             provider="blockrun"
                         )
-    
+                        
                         mark_posted(token["symbol"], cat, hook, market_cap)
-    
+                        
                         wait_min = (scheduled_time - current_time) / 60
                         print(f"  ✍️ P{worker_id}: {token['symbol']} → {cat} scheduled in {wait_min:.1f} min")
                         time.sleep(random.uniform(2, 5))
@@ -201,6 +206,13 @@ def poster_worker():
         try:
             if check_and_sleep():
                 break
+            
+            # Rate limit check
+            can_post_now_flag, wait_time = can_post_now(10)
+            if not can_post_now_flag:
+                print(f"  ⏳ Rate limit: waiting {wait_time:.0f}s...")
+                time.sleep(wait_time)
+                continue
             
             due_posts = scheduled_queue.get_due_posts(limit=1)
             
@@ -232,6 +244,7 @@ def poster_worker():
                 if success:
                     mark_posted(sym, cat)
                     print(f"  ✅ {sym} posted")
+                    _post_times.append(time.time())
                 else:
                     print(f"  ❌ {sym} failed to post")
                 
@@ -255,6 +268,15 @@ def run_orchestrator():
     print(f"📊 Daily limit: {DAILY_POST_LIMIT} posts/day")
     print(f"📰 News refresh interval: {NEWS_REFRESH_INTERVAL}s")
     print(f"{'='*50}\n")
+    
+    # Auto-clean queues
+    print("  🧹 Auto-cleaning queues...")
+    scheduled_queue = ScheduledPostQueue()
+    deleted_posts = scheduled_queue.delete_old_posts(3600)  # 1 hour
+    print(f"  🧹 Cleaned {deleted_posts} expired posts")
+    
+    deleted_tokens = data_queue.delete_old_entries(24)  # 24 hours
+    print(f"  🧹 Cleaned {deleted_tokens} old token entries")
     
     # Initialize news cache
     _last_news_refresh = 0

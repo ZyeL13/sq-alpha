@@ -31,7 +31,7 @@ STABLE_BLACKLIST = {
     "PAX", "HUSD", "USDN", "UST", "VAI", "USDD", "FRAX",
     "RLUSD", "USD1", "USDE", "U", "XUSD",
     "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "CNY", "HKD", "SGD",
-    "DOWN", "UP", "BEAR", "BULL", "SHORT", "LONG", "EURI", "WBTC",
+    "DOWN", "UP", "BEAR", "BULL", "SHORT", "LONG", "EURI", "WBTC", "WBETH",
 }
 
 # ========== MULTI LLM PROVIDERS ==========
@@ -39,7 +39,7 @@ LLM_PROVIDERS = {
     "blockrun": {
         "api_key": "not-needed",
         "api_url": "http://127.0.0.1:8402/v1/chat/completions",
-        "model": "free/mistral-large-3-675b",
+        "model": "mistral-free", # deepseek-free
         "max_tokens": 666,
         "temperature": 0.65,
         "top_p": 0.85,
@@ -51,12 +51,12 @@ LLM_PROVIDERS = {
         "api_key": GROQ_API_KEY,
         "api_url": "https://api.groq.com/openai/v1/chat/completions",
         "model": "llama-3.3-70b-versatile",
-        "max_tokens": 500,
-        "temperature": 0.7,
+        "max_tokens": 600,
+        "temperature": 0.6,
         "top_p": 0.9,
         "requests_per_minute": 10,
         "enabled": True,
-        "weight": 2,
+        "weight": 4,
     },
     "deepseek": {
         "api_key": os.getenv("DEEPSEEK_API_KEY"),
@@ -151,3 +151,9 @@ SIMILARITY_THRESHOLD = 0.65
 
 # Daily post target (bukan limit hard)
 DAILY_POST_TARGET = 70  # dari 100
+
+# ========== QUEUE MANAGEMENT ==========
+MAX_PERSISTENT_QUEUE_SIZE = 200      # Max token dalam persistent queue
+POST_EXPIRY_HOURS = 2                # Post expired setelah 2 jam
+TOKEN_EXPIRY_HOURS = 24              # Token expired setelah 24 jam
+MIN_POST_INTERVAL_SECONDS = 10       # Minimal 10 detik antar post

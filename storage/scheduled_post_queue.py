@@ -129,3 +129,16 @@ class ScheduledPostQueue:
                 "next_post": row[1],
                 "last_post": row[2]
             }
+
+    def delete_old_posts(self, max_age_seconds: int = 3600):
+        """Delete posts that are older than max_age_seconds (default 1 hour)"""
+        with self._lock:
+            cutoff = time.time() - max_age_seconds
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            cursor = conn.execute("DELETE FROM scheduled_posts WHERE scheduled_time < ?", (cutoff,))
+            deleted = cursor.rowcount
+            conn.commit()
+            conn.close()
+            if deleted:
+                print(f"  🗑️ Auto-deleted {deleted} expired posts (> {max_age_seconds//60} min)")
+            return deleted

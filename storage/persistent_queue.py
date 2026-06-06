@@ -101,3 +101,29 @@ class PersistentQueue:
                 "oldest": row[1],
                 "newest": row[2]
             }
+
+    def size(self) -> int:
+        """Get current queue size"""
+        with self._lock:
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            cursor = conn.execute("SELECT COUNT(*) FROM queue")
+            count = cursor.fetchone()[0]
+            conn.close()
+            return count
+
+    def is_full(self, max_size: int = 200) -> bool:
+        """Check if queue exceeds max size"""
+        return self.size() >= max_size
+
+    def delete_old_entries(self, max_age_hours: int = 24):
+        """Delete entries older than max_age_hours"""
+        with self._lock:
+            cutoff = time.time() - (max_age_hours * 3600)
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            cursor = conn.execute("DELETE FROM queue WHERE created_at < ?", (cutoff,))
+            deleted = cursor.rowcount
+            conn.commit()
+            conn.close()
+            if deleted:
+                print(f"  🗑️ Auto-deleted {deleted} old token entries (> {max_age_hours}h)")
+            return deleted
