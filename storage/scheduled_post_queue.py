@@ -3,13 +3,17 @@ import sqlite3
 import json
 import time
 import threading
+import os
+
 from datetime import datetime
 from typing import Optional, List, Tuple
 
 class ScheduledPostQueue:
     """Thread-safe persistent queue with scheduled posting times"""
     
-    def __init__(self, db_path: str = "storage/scheduled_queue.db"):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            db_path = os.path.join(os.path.dirname(__file__), "scheduled_queue.db")
         self.db_path = db_path
         self._lock = threading.Lock()
         self._init_db()

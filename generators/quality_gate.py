@@ -137,3 +137,7 @@ def record_post(content: str):
     if len(_recent_posts) > 20:
         _recent_posts.pop(0)
 
+def get_reject_stats():
+    """Return stats about common reject reasons (call from post_generator)"""
+    # Ini bisa diimplementasikan jika mau tracking reject rate
+    pass

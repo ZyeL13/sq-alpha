@@ -4,6 +4,7 @@ import requests
 import re
 import sys
 import os
+import logging  # TAMBAHKAN
 
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, BINANCE_SQUARE_KEY, BINANCE_SQUARE_URL
 from storage.post_counter import can_post, increment_post_counter, get_today_posts, DAILY_POST_LIMIT
@@ -11,6 +12,13 @@ from utils.performance_logger import log_post, update_metrics, get_stats
 from storage.scheduled_post_queue import ScheduledPostQueue
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Setup audit logger
+audit_logger = logging.getLogger('post_audit')
+if not audit_logger.handlers:
+    audit_handler = logging.FileHandler('logs/post_audit.log')
+    audit_handler.setFormatter(logging.Formatter('%(asctime)s|%(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+    audit_logger.addHandler(audit_handler)
 
 # Global flag to prevent multiple shutdown messages
 _shutdown_done = False
@@ -66,7 +74,7 @@ def post_to_telegram(text, category):
         "ALPHA": "🐺 ALPHA",
     }
     label = label_map.get(category, category)
-    full = f"✍️ *yè writing... — {label}*\n\n{text}"
+    full = f"✍️ *yè writing... - {label}*\n\n{text}"
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
     for attempt in range(2):
@@ -113,7 +121,7 @@ def post_to_square(content):
     payload = {"bodyTextOnly": cleaned}
     
     try:
-        r = requests.post(BINANCE_SQUARE_URL, headers=headers, json=payload, timeout=15)
+        r = requests.post(BINANCE_SQUARE_URL, headers=headers, json=payload, timeout=15, verify=False)
         
         if r.status_code == 200:
             result = r.json()
@@ -127,6 +135,7 @@ def post_to_square(content):
                 
                 # 220009 = daily limit reached
                 if error_code == "220009":
+                    audit_logger.info(f"SQUARE_LIMIT|{get_today_posts()}/{DAILY_POST_LIMIT}")
                     shutdown_if_limit_reached()
                 return False
         else:
@@ -167,6 +176,9 @@ def post_to_targets(content, category, symbol=None, hook=None, angle=None, sessi
             print("  ✅ Square posted (COUNTED)")
             increment_post_counter()
             
+            # AUDIT LOG: Post berhasil ke Square
+            audit_logger.info(f"SQUARE_POSTED|{symbol}|{category}|{hook}|{session}")
+            
             # Log performance data if symbol provided
             if symbol:
                 try:
@@ -186,6 +198,7 @@ def post_to_targets(content, category, symbol=None, hook=None, angle=None, sessi
             return True
         else:
             print("  ❌ Square failed (not counted)")
+            audit_logger.warning(f"SQUARE_FAILED|{symbol}|{category}")
             return False
     else:
         print("  ⚠️ Square not configured")

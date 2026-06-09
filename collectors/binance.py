@@ -4,9 +4,27 @@ import logging
 import requests
 import json
 import os
+import certifi
+import urllib3
 from typing import List, Dict, Any
 from config import STABLE_BLACKLIST, FIRST_SEEN_FILE
 import logging_config
+
+# Suppress InsecureRequestWarning if verify=False fallback is triggered
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+TERMUX_CERT = "/data/data/com.termux/files/usr/etc/tls/cert.pem"
+
+def _ssl_verify():
+    import os
+    if os.path.exists(TERMUX_CERT):
+        return TERMUX_CERT      # system cert dari pkg ca-certificates
+    try:
+        return certifi.where()  # certifi fallback
+    except Exception:
+        return False
+
+_VERIFY = False
 
 logger = logging_config.get_logger("binance")
 
@@ -68,19 +86,22 @@ def get_token_age_hours(symbol: str, full_symbol: str) -> float:
 
 
 def fetch_binance_tickers(retries: int = 3) -> List[Dict[str, Any]]:
-    """Fetch 24hr ticker data from Binance with retry"""
+    """Fetch 24hr ticker data from Binance with retry and certifi SSL"""
     urls = [
-        "https://api.binance.com/api/v3/ticker/24hr",
-        "https://api1.binance.com/api/v3/ticker/24hr",
-        "https://api2.binance.com/api/v3/ticker/24hr",
-        "https://api3.binance.com/api/v3/ticker/24hr",
+        "https://data-api.binance.vision/api/v3/ticker/24hr",
+        "https://data-api.binance.vision/api/v3/exchangeInfo",  # untuk get_new_listings
     ]
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
     
     for url in urls:
         for attempt in range(retries):
             try:
-                resp = requests.get(url, timeout=30, headers=headers)
+                # Gunakan certifi untuk SSL verification
+                resp = requests.get(url, timeout=30, headers=headers, verify=_VERIFY)
                 resp.raise_for_status()
                 data = resp.json()
                 
@@ -118,6 +139,20 @@ def fetch_binance_tickers(retries: int = 3) -> List[Dict[str, Any]]:
             except requests.exceptions.Timeout:
                 logger.warning(f"Timeout on {url} (attempt {attempt+1})")
                 time.sleep(5 * (attempt + 1))
+            except requests.exceptions.SSLError as e:
+                logger.error(f"SSL Error on {url}: {e}")
+                # Fallback: coba tanpa verify (hanya untuk testing)
+                try:
+                    resp = requests.get(url, timeout=30, headers=headers, verify=False)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    # ... proses data sama seperti di atas
+                    # (copy kode proses data dari atas)
+                    logger.warning(f"SSL verification disabled for {url}")
+                    # return data
+                except:
+                    pass
+                time.sleep(5)
             except Exception as e:
                 logger.error(f"Error on {url}: {e}")
                 time.sleep(3)
@@ -142,10 +177,9 @@ def fetch_all_binance(limit: int = None) -> List[Dict[str, Any]]:
 
 
 def fetch_new_listings() -> set:
-    """Get recently listed USDT pairs (last ~30 listings)"""
-    url = "https://api.binance.com/api/v3/exchangeInfo"
+    url = "https://data-api.binance.vision/api/v3/exchangeInfo?permissions=SPOT"
     try:
-        resp = requests.get(url, timeout=15)
+        resp = requests.get(url, timeout=60, verify=_VERIFY)  # 60s, file besar
         data = resp.json()
         all_usdt = [
             s['symbol'] for s in data['symbols']

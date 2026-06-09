@@ -1,7 +1,8 @@
-# schedulers/orchestrator.py
+# schedulers/orchestrator.py (lengkap dengan logging audit)
 import time
 import random
 import threading
+import logging
 from queue import Empty
 from datetime import datetime
 from collections import deque
@@ -24,6 +25,10 @@ logger = logging_config.get_logger("orchestrator")
 data_queue = PersistentQueue()
 stop_flag = threading.Event()
 _shutdown = False
+
+# Setup audit logger
+from logging_config import get_audit_logger
+audit_logger = get_audit_logger()
 
 # Rate limiter untuk poster
 _post_times = deque(maxlen=10)
@@ -57,6 +62,8 @@ def check_and_sleep():
         print(f"  📅 Reset in {hours}h {minutes}m (7 AM WIB)")
         print(f"  💤 Sleeping {hours}h {minutes}m until reset...\n")
         
+        audit_logger.info(f"DAILY_LIMIT|{get_today_posts()}|sleep_{hours}h{minutes}m")
+        
         time.sleep(seconds_until_reset)
         
         from storage.post_counter import reset_counter
@@ -64,6 +71,7 @@ def check_and_sleep():
         
         _shutdown = False
         print(f"  🌅 New day! Resuming pipeline...\n")
+        audit_logger.info("DAILY_RESET|resumed")
         stop_flag.clear()
     
     return _shutdown
@@ -181,12 +189,19 @@ def processor_worker(worker_id: int):
                         
                         wait_min = (scheduled_time - current_time) / 60
                         print(f"  ✍️ P{worker_id}: {token['symbol']} → {cat} scheduled in {wait_min:.1f} min")
+                        
+                        # AUDIT LOG: Post dijadwalkan
+                        audit_logger.info(f"SCHEDULED|{token['symbol']}|{cat}|{hook}|{session}|{int(scheduled_time)}")
+                        logger.info(f"POST_SCHEDULED: {token['symbol']} -> {cat} scheduled in {wait_min:.1f} min")
                         time.sleep(random.uniform(2, 5))
                     else:
                         print(f"  ⚠️ P{worker_id}: {token['symbol']} → {cat} (no post)")
+                        # AUDIT LOG: Gagal generate
+                        audit_logger.info(f"NO_POST|{token['symbol']}|{cat}|generate_failed")
                         
                 except Exception as inner_e:
                     print(f"  ⚠️ P{worker_id}: Error processing {token.get('symbol', '?')}: {inner_e}")
+                    audit_logger.info(f"ERROR|{token.get('symbol', '?')}|{cat}|{str(inner_e)[:50]}")
                     continue
             
             time.sleep(random.uniform(0.5, 1))
@@ -245,8 +260,13 @@ def poster_worker():
                     mark_posted(sym, cat)
                     print(f"  ✅ {sym} posted")
                     _post_times.append(time.time())
+                    # AUDIT LOG: Post berhasil
+                    audit_logger.info(f"POSTED|{sym}|{cat}|{hook}|{session}|{provider}")
+                    logger.info(f"POST_SUCCESS: {sym} -> {cat} posted successfully")
                 else:
                     print(f"  ❌ {sym} failed to post")
+                    # AUDIT LOG: Post gagal
+                    audit_logger.info(f"FAILED|{sym}|{cat}|post_to_targets_failed")
                 
                 scheduled_queue.remove_post(post_id)
                 check_and_sleep()
@@ -268,6 +288,8 @@ def run_orchestrator():
     print(f"📊 Daily limit: {DAILY_POST_LIMIT} posts/day")
     print(f"📰 News refresh interval: {NEWS_REFRESH_INTERVAL}s")
     print(f"{'='*50}\n")
+    
+    audit_logger.info(f"PIPELINE_START|{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Auto-clean queues
     print("  🧹 Auto-cleaning queues...")
@@ -302,6 +324,7 @@ def run_orchestrator():
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n🛑 Stopping orchestrator...")
+        audit_logger.info("PIPELINE_STOP|keyboard_interrupt")
         stop_flag.set()
         time.sleep(2)
         print("👋 Bye!")

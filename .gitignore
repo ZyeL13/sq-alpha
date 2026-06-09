@@ -41,3 +41,14 @@ storage/scheduled_queue.db-*
 # Log files
 logs/
 *.log
+
+# Audit & export files
+audit_posts.csv
+posts_export.csv
+export_audit.py
+export_db.py
+update_audit.py
+backup_cache/
+
+# Performance logs
+logs/post_performance.jsonl

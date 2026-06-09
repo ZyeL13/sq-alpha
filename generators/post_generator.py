@@ -5,9 +5,16 @@ from prompts.rebate import REBATE_SYSTEM
 from prompts.styles import get_hook, get_angle, get_cta, get_transition
 from generators.quality_gate import validate_post, finalize_post
 import logging_config
+import logging  # TAMBAHKAN
 
 logger = logging_config.get_logger("post_generator")
 
+# Setup audit logger
+audit_logger = logging.getLogger('post_audit')
+if not audit_logger.handlers:
+    audit_handler = logging.FileHandler('logs/post_audit.log')
+    audit_handler.setFormatter(logging.Formatter('%(asctime)s|%(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+    audit_logger.addHandler(audit_handler)
 
 def build_prompt(token: Dict[str, Any], category: str) -> str:
     symbol = token["symbol"]
@@ -49,13 +56,13 @@ FORMAT:
 - Start directly with the HOOK below.
 - End with the CLOSING line below, verbatim.
 
-HOOK — copy this as your FIRST LINE, word for word:
+HOOK - copy this as your FIRST LINE, word for word:
 {hook}
 
-ANGLE — use this as the basis for your second paragraph, reworded with the data above:
+ANGLE - use this as the basis for your second paragraph, reworded with the data above:
 {angle}
 
-CLOSING — this is your last line, copy exactly:
+CLOSING - this is your last line, copy exactly:
 {closing_line}
 
 RULES:
@@ -89,21 +96,29 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
     content = generate(prompt, system_prompt=REBATE_SYSTEM, category=category)
     
     if not content or not isinstance(content, str):
+        # AUDIT LOG: Gagal generate dari LLM
+        audit_logger.warning(f"GENERATE_FAILED|{token['symbol']}|{category}|no_content")
         return None
     
     # Quality validation
     valid, result = validate_post(content)
     if not valid:
         logger.warning(f"Quality gate REJECTED for ${token['symbol']}: {result}")
+        # AUDIT LOG: Reject karena quality gate
+        audit_logger.info(f"REJECTED|{token['symbol']}|{category}|{result}")
         return None
     
     content = result.strip()
     
     if len(content) < 50:
         print(f"  🚫 Post too short ({len(content)} chars)")
+        audit_logger.info(f"REJECTED|{token['symbol']}|{category}|too_short_{len(content)}_chars")
         return None
     
     # Finalize (record for similarity check)
     content = finalize_post(content, token["symbol"])
+    
+    # AUDIT LOG: Post berhasil di-generate
+    audit_logger.info(f"GENERATED|{token['symbol']}|{category}|{len(content)}_chars")
     
     return content

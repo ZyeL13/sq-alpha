@@ -1,4 +1,4 @@
-# config.py — Centraxl configuration
+# config.py — Central configuration
 import os
 from dotenv import load_dotenv
 
@@ -12,6 +12,7 @@ BINANCE_SQUARE_URL = os.getenv("BINANCE_SQUARE_URL")
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY")
 BITQUERY_API_KEY   = os.getenv("BITQUERY_API_KEY")
 DEEPSEEK_API_KEY   = os.getenv("DEEPSEEK_API_KEY")
+NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY")
 
 # ========== PATHS ==========
 BASE_DIR = "/data/data/com.termux/files/home/binance"
@@ -39,7 +40,7 @@ LLM_PROVIDERS = {
     "blockrun": {
         "api_key": "not-needed",
         "api_url": "http://127.0.0.1:8402/v1/chat/completions",
-        "model": "mistral-free", # deepseek-free
+        "model": "deepseek-free",
         "max_tokens": 666,
         "temperature": 0.65,
         "top_p": 0.85,
@@ -59,19 +60,19 @@ LLM_PROVIDERS = {
         "weight": 4,
     },
     "deepseek": {
-        "api_key": os.getenv("DEEPSEEK_API_KEY"),
-        "api_url": "https://api.deepseek.com/v1/chat/completions",  # endpoint tetap sama
-        "model": "deepseek-v4-flash",  # ← ganti dari "deepseek-chat"
+        "api_key": DEEPSEEK_API_KEY,
+        "api_url": "https://api.deepseek.com/v1/chat/completions",
+        "model": "deepseek-v4-flash",
         "max_tokens": 600,
         "temperature": 0.69,
         "top_p": 0.9,
-        "thinking_mode": "non-thinking",  # tambahan untuk V4
+        "thinking_mode": "non-thinking",
         "requests_per_minute": 10,
         "enabled": True,
         "weight": 1,
     },
     "nvidia_nim": {
-        "api_key": os.getenv("NVIDIA_NIM_API_KEY"),
+        "api_key": NVIDIA_NIM_API_KEY,
         "api_url": "https://integrate.api.nvidia.com/v1/chat/completions",
         "model": "meta/llama-3.3-70b-instruct",
         "max_tokens": 600,
@@ -113,12 +114,17 @@ RSS_MAX_ARTICLES_PER_SOURCE = 5
 RSS_REFRESH_INTERVAL = 300   # seconds
 
 # ========== CLASSIFICATION THRESHOLDS ==========
-HOT_VOLUME_RANK_MAX = 100
-HOT_PRICE_CHANGE_MAX = 3.0
+# HOT: low perform, kurangi porsi
+HOT_VOLUME_RANK_MAX = 30
+HOT_PRICE_CHANGE_MAX = 1.5
+
+# GAINERS/LOSERS
 GAINER_THRESHOLD = 3.0
 LOSER_THRESHOLD = -3.0
-ALPHA_MAX_MCAP = 1_000_000
-ALPHA_MIN_VOLUME = 100_000
+
+# ALPHA: fokus utama (perbesar threshold)
+ALPHA_MAX_MCAP = 5_000_000
+ALPHA_MIN_VOLUME = 50_000
 
 # ========== SCORING WEIGHTS (unused, reserved) ==========
 MOMENTUM_WEIGHT = 0.25
@@ -146,14 +152,17 @@ TOKEN_COOLDOWN_OVERRIDES = {
     "DOGE": 8 * 3600,
 }
 
-# Similarity threshold (0-1)
+# ========== QUEUE MANAGEMENT ==========
+MAX_PERSISTENT_QUEUE_SIZE = 200
+POST_EXPIRY_HOURS = 2
+TOKEN_EXPIRY_HOURS = 24
+MIN_POST_INTERVAL_SECONDS = 10
+
+# ========== SIMILARITY ==========
 SIMILARITY_THRESHOLD = 0.65
 
-# Daily post target (bukan limit hard)
-DAILY_POST_TARGET = 70  # dari 100
+# ========== DAILY TARGET ==========
+DAILY_POST_TARGET = 70  # soft limit
 
-# ========== QUEUE MANAGEMENT ==========
-MAX_PERSISTENT_QUEUE_SIZE = 200      # Max token dalam persistent queue
-POST_EXPIRY_HOURS = 2                # Post expired setelah 2 jam
-TOKEN_EXPIRY_HOURS = 24              # Token expired setelah 24 jam
-MIN_POST_INTERVAL_SECONDS = 10       # Minimal 10 detik antar post
+# ========== CLOSER SETTINGS ==========
+CLOSER_ENABLED = False  # True untuk aktif, False untuk mati

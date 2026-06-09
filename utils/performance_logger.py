@@ -1,10 +1,21 @@
 # utils/performance_logger.py
 import json
 import os
+import time
+import csv
 from datetime import datetime, timezone
 from pathlib import Path
 
 LOG_PATH = Path(os.getenv("LOG_DIR", "logs")) / "post_performance.jsonl"
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+def _rotate_if_needed():
+    """Rotate log file if it exceeds max size"""
+    if LOG_PATH.exists() and LOG_PATH.stat().st_size > MAX_FILE_SIZE:
+        backup_path = LOG_PATH.with_suffix(f".{int(time.time())}.jsonl")
+        LOG_PATH.rename(backup_path)
+        print(f"📦 Rotated performance log to {backup_path.name}")
 
 
 def log_post(
@@ -18,17 +29,23 @@ def log_post(
     post_id: str = "",
 ):
     """Log a posted entry. Call immediately after successful post."""
+    # Validasi
+    if not symbol or not category:
+        print(f"⚠️ Invalid log_post call: symbol={symbol}, category={category}")
+        return
+    
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_if_needed()
 
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
-        "symbol": symbol,
+        "symbol": symbol.upper(),
         "category": category,
-        "hook": hook,
-        "angle": angle,
+        "hook": hook[:100] if hook else "",
+        "angle": angle[:100] if angle else "",
         "session": session,
         "llm": llm_provider,
-        "post_id": post_id,
+        "post_id": post_id or f"{symbol}_{int(time.time())}",
         "length": len(post_content),
         # fill these later via update_metrics()
         "views": None,
@@ -49,6 +66,8 @@ def update_metrics(post_id: str, views: int = None, likes: int = None,
 
     lines = LOG_PATH.read_text(encoding="utf-8").splitlines()
     updated = []
+    found = False
+    
     for line in lines:
         try:
             entry = json.loads(line)
@@ -57,11 +76,13 @@ def update_metrics(post_id: str, views: int = None, likes: int = None,
                 if likes is not None:    entry["likes"] = likes
                 if comments is not None: entry["comments"] = comments
                 if rebate is not None:   entry["rebate"] = rebate
+                found = True
             updated.append(json.dumps(entry))
         except json.JSONDecodeError:
             updated.append(line)
 
-    LOG_PATH.write_text("\n".join(updated) + "\n", encoding="utf-8")
+    if found:
+        LOG_PATH.write_text("\n".join(updated) + "\n", encoding="utf-8")
 
 
 def get_stats() -> dict:
@@ -81,7 +102,7 @@ def get_stats() -> dict:
 
     from collections import defaultdict
 
-    hook_views    = defaultdict(list)
+    hook_views = defaultdict(list)
     session_views = defaultdict(list)
     category_views = defaultdict(list)
 
@@ -90,7 +111,7 @@ def get_stats() -> dict:
 
     for e in entries:
         v = e.get("views") or 0
-        hook_views[e.get("hook", "")][:]; hook_views[e["hook"]].append(v)
+        hook_views[e.get("hook", "")].append(v)
         session_views[e.get("session", "")].append(v)
         category_views[e.get("category", "")].append(v)
         if e.get("rebate") is not None:
@@ -111,3 +132,73 @@ def get_stats() -> dict:
         "top_categories": top(category_views),
     }
 
+
+def export_to_csv(output_file: str = "posts_export.csv"):
+    """Export all posts to CSV for manual audit"""
+    if not LOG_PATH.exists():
+        print("No log file found")
+        return
+    
+    entries = []
+    for line in LOG_PATH.read_text(encoding="utf-8").splitlines():
+        try:
+            entries.append(json.loads(line))
+        except:
+            continue
+    
+    if not entries:
+        print("No entries found")
+        return
+    
+    with open(output_file, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Date', 'Time', 'Symbol', 'Category', 'Hook', 'Views', 'Likes', 'Rebate', 'Length'])
+        
+        for e in entries:
+            try:
+                dt = datetime.fromisoformat(e['ts'].replace('Z', '+00:00'))
+                writer.writerow([
+                    dt.strftime('%Y-%m-%d'),
+                    dt.strftime('%H:%M'),
+                    e['symbol'],
+                    e['category'],
+                    e['hook'][:60] if e['hook'] else '',
+                    e.get('views', ''),
+                    e.get('likes', ''),
+                    e.get('rebate', ''),
+                    e.get('length', '')
+                ])
+            except:
+                continue
+    
+    print(f"✅ Exported {len(entries)} posts to {output_file}")
+
+
+def export_to_markdown(output_file: str = "posts_audit.md"):
+    """Export to Markdown table for documentation"""
+    if not LOG_PATH.exists():
+        print("No log file found")
+        return
+    
+    entries = []
+    for line in LOG_PATH.read_text(encoding="utf-8").splitlines():
+        try:
+            entries.append(json.loads(line))
+        except:
+            continue
+    
+    if not entries:
+        return
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write("# Post Audit Log\n\n")
+        f.write("| Date | Time | Symbol | Category | Views | Rebate |\n")
+        f.write("|------|------|--------|----------|-------|--------|\n")
+        
+        for e in entries[:100]:  # 100 terbaru
+            dt = datetime.fromisoformat(e['ts'].replace('Z', '+00:00'))
+            views = e.get('views', '') or ''
+            rebate = e.get('rebate', '') or ''
+            f.write(f"| {dt.strftime('%Y-%m-%d')} | {dt.strftime('%H:%M')} | {e['symbol']} | {e['category']} | {views} | {rebate} |\n")
+    
+    print(f"✅ Exported {min(len(entries), 100)} posts to {output_file}")
