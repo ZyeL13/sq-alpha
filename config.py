@@ -33,6 +33,7 @@ STABLE_BLACKLIST = {
     "RLUSD", "USD1", "USDE", "U", "XUSD",
     "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "CNY", "HKD", "SGD",
     "DOWN", "UP", "BEAR", "BULL", "SHORT", "LONG", "EURI", "WBTC", "WBETH",
+    "HIGH",
 }
 
 # ========== MULTI LLM PROVIDERS ==========
@@ -40,21 +41,21 @@ LLM_PROVIDERS = {
     "blockrun": {
         "api_key": "not-needed",
         "api_url": "http://127.0.0.1:8402/v1/chat/completions",
-        "model": "deepseek-free",
-        "max_tokens": 666,
-        "temperature": 0.65,
-        "top_p": 0.85,
+        "model": "free",
+        "max_tokens": 555,
+        "temperature": 0.55,
+        "top_p": 0.9,
         "requests_per_minute": 10,
         "enabled": True,
-        "weight": 5,
+        "weight": 1,
     },
     "groq": {
         "api_key": GROQ_API_KEY,
         "api_url": "https://api.groq.com/openai/v1/chat/completions",
         "model": "llama-3.3-70b-versatile",
         "max_tokens": 600,
-        "temperature": 0.6,
-        "top_p": 0.9,
+        "temperature": 0.69,
+        "top_p": 0.85,
         "requests_per_minute": 10,
         "enabled": True,
         "weight": 4,
@@ -80,16 +81,16 @@ LLM_PROVIDERS = {
         "top_p": 0.85,
         "requests_per_minute": 10,
         "enabled": True,
-        "weight": 3,
+        "weight": 5,
     },
 }
 
 # Category to preferred provider
 CATEGORY_PREFERRED = {
-    "HOT": "nvidia_nim",
-    "ALPHA": "nvidia_nim",
-    "GAINERS": "nvidia_nim",
-    "LOSERS": "nvidia_nim",
+    "HOT": "blockrun",
+    "ALPHA": "blockrun",
+    "GAINERS": "blockrun",
+    "LOSERS": "blockrun",
 }
 
 # ========== POST MODE ==========

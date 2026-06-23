@@ -92,7 +92,9 @@ def _call_provider(provider: str, user_prompt: str, system_prompt: str,
             if response.status_code == 200:
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
-    
+                import re
+                content = re.sub(r'\$([A-Z]+)[\'"]?s\b', r'$\1', content)
+
                 if content and isinstance(content, str):
                     content = content.strip()
         

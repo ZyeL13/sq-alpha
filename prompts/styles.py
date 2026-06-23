@@ -7,11 +7,21 @@ import random
 
 HOOKS = {
     "HOT": [
-        "unusual activity appeared without an obvious catalyst.",
         "volume expanded faster than price reacted.",
         "activity jumped while price stayed near current levels.",
         "participation increased without a major breakout.",
-        "unusual activity appeared during an otherwise quiet session.",
+        "volume expanded during the session.",
+        "activity increased alongside the move.",
+        "price and volume changed together.",
+        "trading activity remained active.",
+        "volume remained a notable part of the session.",
+        "volume picked up without a clear catalyst.",
+        "more activity than the price move suggests.",
+        "participation higher than the chart shows.",
+        "volume running ahead of price.",
+        "quiet move, but volume wasn't quiet.",
+        "price barely moved. volume did.",
+        "session activity above recent average.",
     ],
 
     "GAINERS": [
@@ -20,6 +30,16 @@ HOOKS = {
         "this rally attracted more participation than recent attempts.",
         "buyers remained active after the initial move.",
         "price advanced while volume continued expanding.",
+        "price continued higher during the session.",
+        "volume accompanied the advance.",
+        "activity remained active during the move.",
+        "price and volume expanded together.",
+        "the move continued through the session.",
+        "move held. volume stayed with it.",
+        "buyers didn't leave after the initial push.",
+        "price didn't give back much of the gain.",
+        "follow-through looks intact so far.",
+        "the advance attracted actual participation.",
     ],
 
     "LOSERS": [
@@ -28,15 +48,31 @@ HOOKS = {
         "selling pressure remained active throughout the session.",
         "volume expanded while price continued lower.",
         "the pullback attracted more activity than usual.",
+        "price continued lower during the session.",
+        "volume accompanied the decline.",
+        "the move remained tilted to the downside.",
+        "activity continued as price moved lower.",
+        "price extended the decline during trading.",
+        "sellers showed up consistently through the session.",
+        "no real bounce attempt yet.",
+        "price kept sliding without much resistance.",
+        "volume didn't spike, but selling was steady.",
+        "the dip wasn't bought quickly.",
+        "lower, with volume confirming the direction.",
     ],
 
     "ALPHA": [
-        "activity increased without a visible catalyst.",
         "volume expanded faster than price reacted.",
         "volume expanded while price stayed mostly unchanged.",
-        "more participation than recent sessions would suggest.",
-        "unusual activity appeared on a low-attention token.",
         "interest increased despite limited price movement.",
+        "volume moved. price didn't follow yet.",
+        "activity picked up in a quiet token.",
+        "volume ahead of price, still early.",
+        "low cap, measurable volume change.",
+        "interest showing up before price reacts.",
+        "volume building without a news catalyst.",
+        "something shifted in participation.",
+        "not a big move, but volume is worth watching.",
     ],
 
     "NEW": [
@@ -44,6 +80,12 @@ HOOKS = {
         "price discovery remains in progress.",
         "volume is beginning to establish a baseline.",
         "the first trading sessions remain active.",
+        "first sessions are still setting the range.",
+        "early volume establishing initial interest levels.",
+        "price finding its level in early trading.",
+        "participation is building from a low base.",
+        "still too early to read the direction.",
+        "initial range hasn't broken convincingly yet.",
     ],
 
     "SIGNAL": [
@@ -83,28 +125,33 @@ HOOKS_COMMENTARY = {
 
 ANGLES = {
     "anomaly": [
-        "volume appears elevated relative to the size of the move.",
-        "activity is running above recent norms.",
-        "participation looks stronger than price action alone suggests.",
-        "volume-to-price behavior appears unusual.",
+        "volume accompanied the move.",
+        "trading activity remained active during the session.",
+        "price moved alongside measurable volume.",
+        "the move occurred with substantial trading activity.",
     ],
 
     "divergence": [
-        "volume expanded faster than price.",
-        "activity increased without a comparable move in price.",
-        "participation changed while the chart remained relatively stable.",
+        "price and volume did not expand at the same pace.",
+        "volume changed more noticeably than price.",
+        "activity shifted while price remained relatively contained.",
+        "price and volume showed different rates of change.",
     ],
-
-    "relative_strength": [
-        "holding up better than nearby names.",
-        "showing more resilience than similar tokens.",
-        "price remains relatively stable compared to peers.",
+    "momentum": [
+        "buyers absorbed the move without much pushback.",
+        "price held after the initial move, sellers didn't follow through.",
+        "the advance didn't reverse quickly, which may suggest demand is real.",
+        "volume stayed with the move rather than fading after the initial push.",
+        "sellers haven't been able to push price back to where it started.",
+        "price isn't giving back the gain at the same pace it was made.",
     ],
-
-    "breakout_watch": [
-        "price is approaching a recently important level.",
-        "the current range appears close to resolution.",
-        "recent trading has compressed into a tighter range.",
+    "hesitation": [
+        "the move happened, but follow-through is still unclear.",
+        "volume and price aren't telling the same story yet.",
+        "price moved, but participation didn't expand in proportion.",
+        "activity picked up but didn't sustain at the same level.",
+        "the reaction looks smaller than the volume might suggest.",
+        "neither buyers nor sellers have committed aggressively yet.",
     ],
 }
 
@@ -151,6 +198,12 @@ CLOSERS = [
     "still needs confirmation from price action.",
     "worth watching if activity stays elevated.",
     "momentum looks active for now.",
+    "price remains at current levels.",
+    "the move is still developing.",
+    "activity remains in focus.",
+    "trading remains active.",
+    "the session is still unfolding.",
+
 ]
 
 ANGLES.update(ANGLES_COMPARISON)
@@ -193,3 +246,60 @@ def get_comparison_hook(symbol_a: str, chg_a: float, symbol_b: str, chg_b: float
         f"${symbol_a} moved. ${symbol_b} didn't follow.",
     ]
     return random.choice(templates)
+
+# ========== GETTERS (additions) ==========
+
+# Track recent posts for similarity check
+recent_posts = []
+
+
+def generate_data_anchor(symbol: str, price: float, change_24h: float, volume_24h: float) -> str:
+    """Generate a factual data anchor with real numbers."""
+    vol_m = volume_24h / 1_000_000
+    
+    # Format price sesuai range
+    if price < 0.001:
+        price_str = f"{price:.7f}"
+    elif price < 1:
+        price_str = f"{price:.4f}"
+    else:
+        price_str = f"{price:.2f}"
+    
+    templates = [
+        f"${symbol} at ${price_str}, {change_24h:+.1f}% with ${vol_m:.1f}M volume.",
+        f"${symbol} moved {change_24h:+.1f}% to ${price_str}, volume ${vol_m:.1f}M.",
+        f"${symbol} ${vol_m:.1f}M volume, price ${price_str}, {change_24h:+.1f}%.",
+        f"${symbol} {change_24h:+.1f}% on ${vol_m:.1f}M volume, price ${price_str}.",
+        f"${symbol} at ${price_str}, volume ${vol_m:.1f}M, {change_24h:+.1f}%.",
+        f"${symbol} {change_24h:+.1f}%, ${vol_m:.1f}M traded, price ${price_str}.",
+        f"price ${price_str}, ${vol_m:.1f}M volume, ${symbol} {change_24h:+.1f}%.",
+    ]
+    return random.choice(templates)
+
+
+def is_too_similar(new_post: str, threshold: float = 0.7) -> bool:
+    """Check if new_post is too similar to recent posts using Jaccard similarity."""
+    if not recent_posts:
+        return False
+
+    new_words = set(new_post.lower().split())
+    if not new_words:
+        return False
+
+    for prev in recent_posts:
+        prev_words = set(prev.lower().split())
+        if not prev_words:
+            continue
+        intersection = len(new_words & prev_words)
+        union = len(new_words | prev_words)
+        similarity = intersection / union if union > 0 else 0
+        if similarity > threshold:
+            return True
+    return False
+
+
+def add_to_recent(post: str) -> None:
+    """Add post to recent_posts, keep max 10 entries."""
+    recent_posts.append(post)
+    if len(recent_posts) > 10:
+        recent_posts.pop(0)

@@ -2,10 +2,13 @@
 from typing import Dict, Any, Optional
 from llm import generate
 from prompts.rebate import REBATE_SYSTEM
-from prompts.styles import get_hook, get_angle, get_cta, get_transition
+from prompts.styles import (
+    get_hook, get_angle, get_cta, get_transition,
+    generate_data_anchor, is_too_similar, add_to_recent
+)
 from generators.quality_gate import validate_post, finalize_post
 import logging_config
-import logging  # TAMBAHKAN
+import logging
 
 logger = logging_config.get_logger("post_generator")
 
@@ -16,14 +19,27 @@ if not audit_logger.handlers:
     audit_handler.setFormatter(logging.Formatter('%(asctime)s|%(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
     audit_logger.addHandler(audit_handler)
 
+
 def build_prompt(token: Dict[str, Any], category: str) -> str:
     symbol = token["symbol"]
     price = token.get("price", 0)
     chg = token.get("price_change_percent", 0)
-    vol_m = token.get("volume_24h", 0) / 1_000_000
-
+    volume_raw = token.get("volume_24h", 0)
+    range_pos = token.get("range_position", 0.5)
+    data_anchor = generate_data_anchor(symbol, price, chg, volume_raw)
     news = token.get("news_catalyst", "")
     news_context = f"\nrelevant news: {news}" if news else ""
+
+    if range_pos >= 0.85:
+        range_context = f"${symbol} trading near 24h high."
+    elif range_pos <= 0.15:
+        range_context = f"${symbol} trading near 24h low."
+    else:
+        range_context = ""
+
+    data_section = data_anchor
+    if range_context:
+        data_section += f"\n{range_context}"
 
     if price < 0.001:
         price_str = f"{price:.7f}"
@@ -36,19 +52,22 @@ def build_prompt(token: Dict[str, Any], category: str) -> str:
     hook = get_hook(category)
     angle = get_angle()
     closer = get_closer()
-    cta = get_cta(symbol)
+    cta = ""
 
-    closing_line = f"{closer}\n{cta}" if closer else cta
+    closing_line = closer
+
+    # Generate data anchor for factual reference
+    data_anchor = generate_data_anchor(symbol, price, chg, volume_raw)
 
     prompt = f"""You are writing a short market observation post for Binance Square.
 
 GOAL: Make the reader curious enough to check ${symbol}'s chart.
 
 DATA:
-${symbol} {chg:+.1f}% | price: ${price_str} | volume: ${vol_m:.1f}M{news_context}
+{data_section}
 
 FORMAT:
-- Write 4-7 short paragraphs.
+- Write 4-6 short paragraphs.
 - Separate EVERY paragraph with ONE blank line.
 - Never write large text blocks.
 - Some paragraphs may contain only one sentence.
@@ -62,7 +81,7 @@ HOOK - copy this as your FIRST LINE, word for word:
 ANGLE - use this as the basis for your second paragraph, reworded with the data above:
 {angle}
 
-CLOSING - this is your last line, copy exactly:
+CLOSING - Your final line must be exactly this, nothing after it:
 {closing_line}
 
 RULES:
@@ -82,6 +101,9 @@ RULES:
 - Insert a blank line between every paragraph.
 - Keep visual rhythm clean and easy to scan.
 - Avoid dense walls of text.
+- Always refer to the token as ${symbol} (with $ prefix, uppercase). Never drop the symbol mid-sentence.
+- Never repeat the hook line anywhere else in the post.
+- End with exactly ONE closing line. Do not add any sentence after the closing line.
 
 FORBIDDEN PHRASES:
 - "i'm curious", "it will be interesting", "in the coming days", "it looks like"
@@ -114,11 +136,30 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
         print(f"  🚫 Post too short ({len(content)} chars)")
         audit_logger.info(f"REJECTED|{token['symbol']}|{category}|too_short_{len(content)}_chars")
         return None
+
+    # Add $SYMBOL temporarily if missing (so cleaner can detect it)
+    symbol = token['symbol']
+    if symbol.upper() not in content.upper():
+        content = f"${symbol} " + content
+
+    # CLEAN REDUNDANT SYMBOL REFERENCES
+    from generators.quality_gate import clean_redundant_symbol_references, proofread_post
+    content = clean_redundant_symbol_references(content, symbol)
+    content = proofread_post(content, symbol)
+
+    # Ensure $SYMBOL at start
+    if not content.startswith(f"${symbol}"):
+        content = f"${symbol} " + content
+
+    # Check similarity with recent posts
+    if is_too_similar(content):
+        print(f"  🔄 Post too similar to recent, skipping...")
+        return None
     
-    # Finalize (record for similarity check)
-    content = finalize_post(content, token["symbol"])
-    
+    # Add to recent posts
+    add_to_recent(content)
+
     # AUDIT LOG: Post berhasil di-generate
-    audit_logger.info(f"GENERATED|{token['symbol']}|{category}|{len(content)}_chars")
-    
+    audit_logger.info(f"GENERATED|{symbol}|{category}|{len(content)}_chars")
+
     return content

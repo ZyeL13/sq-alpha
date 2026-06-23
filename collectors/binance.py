@@ -10,7 +10,6 @@ from typing import List, Dict, Any
 from config import STABLE_BLACKLIST, FIRST_SEEN_FILE
 import logging_config
 
-# Suppress InsecureRequestWarning if verify=False fallback is triggered
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TERMUX_CERT = "/data/data/com.termux/files/usr/etc/tls/cert.pem"
@@ -18,9 +17,9 @@ TERMUX_CERT = "/data/data/com.termux/files/usr/etc/tls/cert.pem"
 def _ssl_verify():
     import os
     if os.path.exists(TERMUX_CERT):
-        return TERMUX_CERT      # system cert dari pkg ca-certificates
+        return TERMUX_CERT
     try:
-        return certifi.where()  # certifi fallback
+        return certifi.where()
     except Exception:
         return False
 
@@ -28,7 +27,6 @@ _VERIFY = False
 
 logger = logging_config.get_logger("binance")
 
-# Cache untuk first_seen
 _first_seen_cache = {}
 _FIRST_SEEN_FILE = FIRST_SEEN_FILE
 
@@ -69,14 +67,13 @@ def get_token_age_hours(symbol: str, full_symbol: str) -> float:
     key = full_symbol
     
     if key not in _first_seen_cache:
-        # First time seeing this token
         _first_seen_cache[key] = {
             "symbol": symbol,
             "first_seen": now,
             "full_symbol": full_symbol
         }
         save_first_seen_cache()
-        return 0  # brand new
+        return 0
     
     first_seen = _first_seen_cache[key].get("first_seen", now)
     age_seconds = now - first_seen
@@ -100,7 +97,6 @@ def fetch_binance_tickers(retries: int = 3) -> List[Dict[str, Any]]:
     for url in urls:
         for attempt in range(retries):
             try:
-                # Gunakan certifi untuk SSL verification
                 resp = requests.get(url, timeout=30, headers=headers, verify=_VERIFY)
                 resp.raise_for_status()
                 data = resp.json()
@@ -127,6 +123,12 @@ def fetch_binance_tickers(retries: int = 3) -> List[Dict[str, Any]]:
                         "trade_count": int(d['count']),
                         "source": "binance",
                         "timestamp": time.time(),
+                        "range_position": round(
+                            (float(d['lastPrice']) - float(d['lowPrice'])) / 
+                            (float(d['highPrice']) - float(d['lowPrice'])), 
+                            2
+                        ) if (float(d['highPrice']) - float(d['lowPrice'])) > 0 else 0.5,
+
                     })
                 
                 usdt_tokens.sort(key=lambda x: x['volume_24h'], reverse=True)
@@ -141,15 +143,11 @@ def fetch_binance_tickers(retries: int = 3) -> List[Dict[str, Any]]:
                 time.sleep(5 * (attempt + 1))
             except requests.exceptions.SSLError as e:
                 logger.error(f"SSL Error on {url}: {e}")
-                # Fallback: coba tanpa verify (hanya untuk testing)
                 try:
                     resp = requests.get(url, timeout=30, headers=headers, verify=False)
                     resp.raise_for_status()
                     data = resp.json()
-                    # ... proses data sama seperti di atas
-                    # (copy kode proses data dari atas)
                     logger.warning(f"SSL verification disabled for {url}")
-                    # return data
                 except:
                     pass
                 time.sleep(5)
@@ -168,7 +166,6 @@ def fetch_all_binance(limit: int = None) -> List[Dict[str, Any]]:
     tokens = fetch_binance_tickers()
     max_tokens = limit or 200
     
-    # Add age_hours to each token
     for token in tokens[:max_tokens]:
         full_symbol = token.get("full_symbol", f"{token['symbol']}USDT")
         token["age_hours"] = get_token_age_hours(token["symbol"], full_symbol)

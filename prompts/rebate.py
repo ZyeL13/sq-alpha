@@ -109,6 +109,13 @@ OUTPUT RULES:
 - no reasoning
 - no drafts
 - no chain of thought
+- Never use apostrophe s after $SYMBOL. Write "$BTC" not "$BTC's"
+- Use: "price of $BTC" instead of "$BTC's price"
+- Do not explain your reasoning.
+- Do not think out loud.
+- Do not narrate your process.
+- Write the post directly. Nothing before <post>, nothing after </post>.
+- Every sentence that mentions a price, volume, or percentage MUST include ${symbol} explicitly.
 
 FORBIDDEN PHRASES:
 - under the surface
@@ -124,6 +131,7 @@ FORBIDDEN PHRASES:
 - shadow accumulation
 - silent wallets
 - insiders loading
+
 
 CTA STYLE:
 Soft only.

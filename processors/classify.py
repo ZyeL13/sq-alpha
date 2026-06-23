@@ -10,12 +10,14 @@ from config import (
 )
 
 MEGA_CAPS = {
-    "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX",
+    "BTC", "XRP", "DOGE", "ADA", "TRX",
     "TON", "SUI", "NEAR", "PEPE", "SHIB", "LINK", "AVAX",
     "DOT", "MATIC", "UNI", "ATOM", "LTC", "ETC", "ICP", "BCH",
-    "ZEC", "XMR", "DASH", "ZEN", "BTG",
+    "ZEC", "XMR", "DASH", "ZEN", "BTG", "PHB", "ATA", "A2Z",
     # Tambahan dari data perform rendah
-    "FIL", "APT", "INJ", "RENDER", "ARB", "OP", "WLD",
+    "FIL", "APT", "INJ", "RENDER", "ARB", "OP", "WLD", "OMNI",
+    "LRC", "DENT", "SXP", "RDNT", "FIO", "COCOS", "SYS", "POLY",
+    "TOMO", "UTK", "MBOX", "1000SATS", "D",
 }
 
 
