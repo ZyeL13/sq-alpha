@@ -1,26 +1,28 @@
 # generators/quality_gate.py
 import re
+from collections import defaultdict
+from storage.post_history import record_post, get_recent_posts
 
 # Patterns that indicate reasoning/planning (HARUS ditolak)
 REJECT_PATTERNS = [
-    r"(?i)^(okay|alright|sure|let's|let me|i need|i will|i'm going|first,|so,|now,)",
+    r"(?i)^(okay|alright|sure|let\'s|let me|i need|i will|i\'m going|first,|so,|now,)",
     r"(?i)(let me (think|draft|write|craft|analyze|see|check|try))",
     r"(?i)(i need to (write|create|craft|produce|make|do))",
     r"(?i)(the user (wants|asked|gave|provided|said))",
     r"(?i)^draft",
-    r"(?i)^let's see",
+    r"(?i)^let\'s see",
     r"(?i)^wait[, ]",
     r"(?i)^the user",
     r"(?i)\(example says\)",
     r"(?i)^got it",
-    r"(?i)^let's start",
+    r"(?i)^let\'s start",
     r"(?i)^hmm",
     r"(?i)let me check",
     r"(?i)hold on",
 ]
 
-# Track recent posts for similarity check
-_recent_posts = []
+# For tracking reject reasons
+_reject_reasons = defaultdict(int)
 
 
 def is_reasoning_leak(content: str) -> bool:
@@ -233,11 +235,11 @@ def finalize_post(content: str, symbol: str) -> str:
 
 def is_similar_to_recent(content: str, threshold: float = 0.85) -> bool:
     """Check if content is too similar to recent posts."""
-    if not _recent_posts:
+    if not get_recent_posts():
         return False
 
     words = set(content.lower().split())
-    for prev in _recent_posts[-5:]:
+    for prev in get_recent_posts()[-5:]:
         prev_words = set(prev.lower().split())
         if not words or not prev_words:
             continue
@@ -248,13 +250,6 @@ def is_similar_to_recent(content: str, threshold: float = 0.85) -> bool:
     return False
 
 
-def record_post(content: str):
-    """Add post to history."""
-    _recent_posts.append(content)
-    if len(_recent_posts) > 20:
-        _recent_posts.pop(0)
 
 
-def get_reject_stats():
-    """Return stats about common reject reasons"""
-    pass
+

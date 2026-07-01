@@ -7,6 +7,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from pycoingecko import CoinGeckoAPI
 from config import COINGECKO_CACHE_FILE
+from storage.cache import _load_cache, _save_cache
 
 log = logging.getLogger(__name__)
 
@@ -21,26 +22,7 @@ _cache: Dict[str, Dict] = {}
 _last_call_time = 0
 
 
-def _load_cache():
-    """Load cache from disk"""
-    global _cache
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, 'r') as f:
-                _cache = json.load(f)
-        except:
-            _cache = {}
-    else:
-        _cache = {}
 
-
-def _save_cache():
-    """Save cache to disk"""
-    try:
-        with open(CACHE_FILE, 'w') as f:
-            json.dump(_cache, f, indent=2)
-    except:
-        pass
 
 
 def _get_cached(key: str) -> Optional[Any]:

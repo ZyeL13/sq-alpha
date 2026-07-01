@@ -8,8 +8,8 @@ import logging  # TAMBAHKAN
 
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, BINANCE_SQUARE_KEY, BINANCE_SQUARE_URL
 from storage.post_counter import can_post, increment_post_counter, get_today_posts, DAILY_POST_LIMIT
-from utils.performance_logger import log_post, update_metrics, get_stats
-from storage.scheduled_post_queue import ScheduledPostQueue
+from utils.performance_logger import log_post
+
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

@@ -2,11 +2,9 @@
 from typing import Dict, Any, Optional
 from llm import generate
 from prompts.rebate import REBATE_SYSTEM
-from prompts.styles import (
-    get_hook, get_angle, get_cta, get_transition,
-    generate_data_anchor, is_too_similar, add_to_recent
-)
-from generators.quality_gate import validate_post, finalize_post
+from prompts.styles import get_hook, get_angle, get_cta, get_transition, generate_data_anchor, get_closer
+from generators.quality_gate import validate_post, is_similar_to_recent, clean_redundant_symbol_references, proofread_post
+from storage.post_history import record_post as add_to_recent
 import logging_config
 import logging
 
@@ -48,11 +46,11 @@ def build_prompt(token: Dict[str, Any], category: str) -> str:
     else:
         price_str = f"{price:.2f}"
 
-    from prompts.styles import get_hook, get_angle, get_cta, get_closer
+    
     hook = get_hook(category)
     angle = get_angle()
     closer = get_closer()
-    cta = ""
+    cta = get_cta(symbol)
 
     closing_line = closer
 
@@ -143,7 +141,7 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
         content = f"${symbol} " + content
 
     # CLEAN REDUNDANT SYMBOL REFERENCES
-    from generators.quality_gate import clean_redundant_symbol_references, proofread_post
+    
     content = clean_redundant_symbol_references(content, symbol)
     content = proofread_post(content, symbol)
 
@@ -152,7 +150,7 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
         content = f"${symbol} " + content
 
     # Check similarity with recent posts
-    if is_too_similar(content):
+    if is_similar_to_recent(content):
         print(f"  🔄 Post too similar to recent, skipping...")
         return None
     

@@ -107,6 +107,6 @@ def validate_post_style(text: str) -> Tuple[bool, str]:
     """Convenience function"""
     return get_guard().validate(text)
 
-def record_post(text: str):
+def record_post_for_style_guard(text: str):
     """Record post for future similarity check"""
     get_guard().add_post(text)

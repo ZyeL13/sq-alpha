@@ -15,8 +15,8 @@ DEEPSEEK_API_KEY   = os.getenv("DEEPSEEK_API_KEY")
 NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY")
 
 # ========== PATHS ==========
-BASE_DIR = "/data/data/com.termux/files/home/binance"
-CACHE_DIR = f"{BASE_DIR}/cache"
+BASE_DIR = os.path.dirname(__file__)
+CACHE_DIR = os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # Cache files
@@ -46,7 +46,7 @@ LLM_PROVIDERS = {
         "temperature": 0.55,
         "top_p": 0.9,
         "requests_per_minute": 10,
-        "enabled": True,
+        "enabled": False,
         "weight": 1,
     },
     "groq": {
@@ -57,7 +57,7 @@ LLM_PROVIDERS = {
         "temperature": 0.69,
         "top_p": 0.85,
         "requests_per_minute": 10,
-        "enabled": True,
+        "enabled": False,
         "weight": 4,
     },
     "deepseek": {
@@ -69,7 +69,7 @@ LLM_PROVIDERS = {
         "top_p": 0.9,
         "thinking_mode": "non-thinking",
         "requests_per_minute": 10,
-        "enabled": True,
+        "enabled": False,
         "weight": 1,
     },
     "nvidia_nim": {
@@ -80,7 +80,7 @@ LLM_PROVIDERS = {
         "temperature": 0.69,
         "top_p": 0.85,
         "requests_per_minute": 10,
-        "enabled": True,
+        "enabled": False,
         "weight": 5,
     },
 }
