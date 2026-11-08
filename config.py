@@ -52,8 +52,8 @@ LLM_PROVIDERS = {
         "temperature": 0.55,
         "top_p": 0.9,
         "requests_per_minute": 10,
-        "enabled": False,
-        "weight": 1,
+        "enabled": True,
+        "weight": 10,
     },
     # Primary: Groq Free plan (no card) — openai/gpt-oss-120b,
     # 30 RPM / 1,000 RPD / 200k tokens/day. llama-3.3-70b-versatile was
@@ -67,7 +67,11 @@ LLM_PROVIDERS = {
         "top_p": 0.85,
         "requests_per_minute": 10,
         "enabled": True,
+<<<<<<< Updated upstream
         "weight": 5,
+=======
+        "weight": 7,
+>>>>>>> Stashed changes
     },
     # Fallback: DeepSeek deepseek-flash (V4.1 Flash). NOT free — pay per
     # token, ~$0.15 in / $0.60 out per 1M tokens off-peak (~$0.0004/post).
@@ -92,7 +96,7 @@ LLM_PROVIDERS = {
         "temperature": 0.69,
         "top_p": 0.85,
         "requests_per_minute": 10,
-        "enabled": False,
+        "enabled": True,
         "weight": 5,
     },
 }
