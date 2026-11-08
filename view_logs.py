@@ -3,7 +3,6 @@
 
 import os
 import sys
-from datetime import datetime
 
 log_dir = "logs"
 if not os.path.exists(log_dir):

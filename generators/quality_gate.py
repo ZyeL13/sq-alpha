@@ -1,7 +1,7 @@
 # generators/quality_gate.py
 import re
 from collections import defaultdict
-from storage.post_history import record_post, get_recent_posts
+from storage.post_history import get_recent_posts
 
 # Patterns that indicate reasoning/planning (HARUS ditolak)
 REJECT_PATTERNS = [

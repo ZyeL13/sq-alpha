@@ -4,7 +4,7 @@ import json
 import os
 import logging
 import hashlib
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, List, Tuple
 from config import DEDUP_FILE
 
 log = logging.getLogger(__name__)

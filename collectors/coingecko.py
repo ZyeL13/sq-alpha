@@ -1,8 +1,5 @@
 # collectors/coingecko.py
 import time
-import json
-import os
-import functools
 import logging
 from typing import List, Dict, Any, Optional
 from pycoingecko import CoinGeckoAPI

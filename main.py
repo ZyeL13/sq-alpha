@@ -64,7 +64,7 @@ if __name__ == "__main__":
         elif cmd == "cache-stats":
             from storage.cache import stats
             s = stats()
-            print(f"\n📊 Cache Statistics:")
+            print("\n📊 Cache Statistics:")
             print(f"   File: {s['file']}")
             print(f"   Total entries: {s['size']}")
             print(f"   Valid entries: {s.get('valid_count', 'N/A')}")
@@ -83,7 +83,7 @@ if __name__ == "__main__":
             from processors.dedupe import get_memory, get_stats
             mem = get_memory()
             stats = get_stats() if hasattr(get_memory(), 'get_stats') else {}
-            print(f"\n📊 Deduplication Statistics:")
+            print("\n📊 Deduplication Statistics:")
             print(f"   Posted records: {len(mem.posted)}")
             print(f"   Token cooldown records: {len(mem.last_post_time)}")
             print(f"   Cooldown: {stats.get('cooldown_seconds', 43200)} seconds ({stats.get('cooldown_seconds', 43200)//3600} hours)")
@@ -95,7 +95,7 @@ if __name__ == "__main__":
             mem.posted = {}
             mem.last_post_time = {}
             mem._save()
-            print(f"\n🗑️ Cleared all deduplication records")
+            print("\n🗑️ Cleared all deduplication records")
         
         elif cmd == "help" or cmd == "-h" or cmd == "--help":
             show_help()

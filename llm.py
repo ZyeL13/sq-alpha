@@ -1,12 +1,10 @@
 # llm.py — Multi-provider with priority fallback, rate limiting, and cache
 import time
-import random
-import re
 import requests
 import logging
 from collections import defaultdict
 from config import LLM_PROVIDERS, CATEGORY_PREFERRED
-from storage.cache import get as cache_get, set as cache_set
+from storage.cache import set as cache_set
 
 try:
     from prompts.rebate import REBATE_SYSTEM as DEFAULT_SYSTEM
@@ -108,7 +106,7 @@ def _call_provider(provider: str, user_prompt: str, system_prompt: str,
                     else:
                         print(f"  ⚠️ Content too short ({len(content)} chars)")
                 else:
-                    print(f"  ⚠️ Invalid content type")
+                    print("  ⚠️ Invalid content type")
         
             elif response.status_code == 429:
                 # Rate limit - wait longer
@@ -191,7 +189,7 @@ def generate(user_prompt: str,
             return content
         
         print(f"  ⚠️ {prov} failed: {error}")
-        print(f"  🔁 Falling back to next provider...")
+        print("  🔁 Falling back to next provider...")
         time.sleep(2)
     
     print(f"  ❌ All providers failed. Tried: {", ".join(attempted)}")

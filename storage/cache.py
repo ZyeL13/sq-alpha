@@ -133,7 +133,7 @@ def get(user_prompt: str, system_prompt: str, model: str, temperature: float) ->
                 return response
             else:
                 # Response di cache tidak valid, hapus
-                print(f"  ⚠️ Cache invalid, removing...")
+                print("  ⚠️ Cache invalid, removing...")
                 del _cache[key]
                 _save_cache()
         else:

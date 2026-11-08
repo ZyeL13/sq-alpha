@@ -1,7 +1,7 @@
 # generators/style_guard.py
 import re
 from collections import deque
-from typing import List, Tuple
+from typing import Tuple
 
 # Banned repetitive phrases
 BANNED_PHRASES = [

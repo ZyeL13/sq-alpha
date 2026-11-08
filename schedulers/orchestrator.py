@@ -2,8 +2,6 @@
 import time
 import random
 import threading
-import logging
-from queue import Empty
 from datetime import datetime
 from collections import deque
 
@@ -73,7 +71,7 @@ def check_and_sleep():
         reset_counter()
         
         _shutdown = False
-        print(f"  🌅 New day! Resuming pipeline...\n")
+        print("  🌅 New day! Resuming pipeline...\n")
         audit_logger.info("DAILY_RESET|resumed")
         stop_flag.clear()
     
@@ -310,7 +308,7 @@ def run_orchestrator():
     global _last_news_refresh, _news_cache
     
     print(f"\n{'='*50}")
-    print(f"🚀 Starting Pipeline Orchestrator")
+    print("🚀 Starting Pipeline Orchestrator")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📊 Daily limit: {DAILY_POST_LIMIT} posts/day")
     print(f"📰 News refresh interval: {NEWS_REFRESH_INTERVAL}s")

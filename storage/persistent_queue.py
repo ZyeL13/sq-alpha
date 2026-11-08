@@ -3,7 +3,6 @@ import sqlite3
 import json
 import time
 import threading
-from datetime import datetime
 from typing import Optional, Tuple
 
 class PersistentQueue:
@@ -101,15 +100,6 @@ class PersistentQueue:
                 "oldest": row[1],
                 "newest": row[2]
             }
-
-    def size(self) -> int:
-        """Get current queue size"""
-        with self._lock:
-            conn = sqlite3.connect(self.db_path, check_same_thread=False)
-            cursor = conn.execute("SELECT COUNT(*) FROM queue")
-            count = cursor.fetchone()[0]
-            conn.close()
-            return count
 
     def is_full(self, max_size: int = 200) -> bool:
         """Check if queue exceeds max size"""

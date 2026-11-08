@@ -14,7 +14,7 @@ def main():
     
     if cmd == "stats":
         stats = queue.get_stats()
-        print(f"\n📊 Persistent Queue Statistics:")
+        print("\n📊 Persistent Queue Statistics:")
         print(f"   Total items: {stats['total']}")
         print(f"   Oldest: {stats['oldest']}")
         print(f"   Newest: {stats['newest']}")

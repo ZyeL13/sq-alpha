@@ -2,7 +2,7 @@
 from typing import Dict, Any, Optional
 from llm import generate
 from prompts.rebate import REBATE_SYSTEM
-from prompts.styles import get_hook, get_angle, get_cta, get_transition, generate_data_anchor, get_closer
+from prompts.styles import get_hook, get_angle, generate_data_anchor, get_closer
 from generators.quality_gate import validate_post, is_similar_to_recent, clean_redundant_symbol_references, proofread_post
 from storage.post_history import record_post as add_to_recent
 import logging_config
@@ -38,19 +38,12 @@ def build_prompt(token: Dict[str, Any], category: str) -> str:
     data_section = data_anchor
     if range_context:
         data_section += f"\n{range_context}"
+    if news_context:
+        data_section += news_context
 
-    if price < 0.001:
-        price_str = f"{price:.7f}"
-    elif price < 1:
-        price_str = f"{price:.4f}"
-    else:
-        price_str = f"{price:.2f}"
-
-    
     hook = get_hook(category)
     angle = get_angle()
     closer = get_closer()
-    cta = get_cta(symbol)
 
     closing_line = closer
 
@@ -151,7 +144,7 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
 
     # Check similarity with recent posts
     if is_similar_to_recent(content):
-        print(f"  🔄 Post too similar to recent, skipping...")
+        print("  🔄 Post too similar to recent, skipping...")
         return None
     
     # Add to recent posts
