@@ -161,12 +161,11 @@ def test_quality_gate_rejects_reasoning_leak_and_accepts_valid():
     assert "Reasoning leak" in reason
 
 
-def test_llm_providers_all_disabled_documents_current_state():
-    """Documents the Fase 1 finding: no provider is enabled as committed.
+def test_llm_providers_enabled_groq_first():
+    """Fase 3 langkah 3: Groq (free) is primary, DeepSeek is fallback.
 
-    This test will need updating when a provider is (re-)enabled in
-    Fase 3 langkah 3 — that is intentional, it guards the decision.
+    Previously all providers were disabled and this list was empty.
     """
     from llm import _get_providers_by_priority
 
-    assert _get_providers_by_priority() == []
+    assert _get_providers_by_priority() == ["groq", "deepseek"]

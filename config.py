@@ -49,28 +49,34 @@ LLM_PROVIDERS = {
         "enabled": False,
         "weight": 1,
     },
+    # Primary: Groq Free plan (no card) — openai/gpt-oss-120b,
+    # 30 RPM / 1,000 RPD / 200k tokens/day. llama-3.3-70b-versatile was
+    # decommissioned by Groq on 2026-08-16 (404 model_not_found).
     "groq": {
         "api_key": GROQ_API_KEY,
         "api_url": "https://api.groq.com/openai/v1/chat/completions",
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-120b",
         "max_tokens": 600,
         "temperature": 0.69,
         "top_p": 0.85,
         "requests_per_minute": 10,
-        "enabled": False,
-        "weight": 4,
+        "enabled": True,
+        "weight": 5,
     },
+    # Fallback: DeepSeek deepseek-flash (V4.1 Flash). NOT free — pay per
+    # token, ~$0.15 in / $0.60 out per 1M tokens off-peak (~$0.0004/post).
+    # deepseek-v4-flash is a legacy alias; deepseek-flash is canonical.
+    # Note: thinking_mode was removed — it was never sent in the payload.
     "deepseek": {
         "api_key": DEEPSEEK_API_KEY,
         "api_url": "https://api.deepseek.com/v1/chat/completions",
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-flash",
         "max_tokens": 600,
         "temperature": 0.69,
         "top_p": 0.9,
-        "thinking_mode": "non-thinking",
         "requests_per_minute": 10,
-        "enabled": False,
-        "weight": 1,
+        "enabled": True,
+        "weight": 4,
     },
     "nvidia_nim": {
         "api_key": NVIDIA_NIM_API_KEY,
@@ -85,12 +91,12 @@ LLM_PROVIDERS = {
     },
 }
 
-# Category to preferred provider
+# Category to preferred provider (tried first, then weight order)
 CATEGORY_PREFERRED = {
-    "HOT": "blockrun",
-    "ALPHA": "blockrun",
-    "GAINERS": "blockrun",
-    "LOSERS": "blockrun",
+    "HOT": "groq",
+    "ALPHA": "groq",
+    "GAINERS": "groq",
+    "LOSERS": "groq",
 }
 
 # ========== POST MODE ==========

@@ -62,10 +62,7 @@ def _call_provider(provider: str, user_prompt: str, system_prompt: str,
         "Authorization": f"Bearer {cfg['api_key']}",
         "Content-Type": "application/json"
     }
-    if provider == "openrouter":
-        headers["HTTP-Referer"] = "https://localhost"
-        headers["X-Title"] = "Crypto Post Generator"
-    
+
     payload = {
         "model": cfg["model"],
         "messages": [
@@ -170,8 +167,14 @@ def generate(user_prompt: str,
             cache_set(user_prompt, system_prompt, cfg["model"], cfg["temperature"], content)
         return content
     
-    # Priority fallback: try providers in weight order
+    # Priority fallback: category-preferred provider first (if enabled),
+    # then the remaining providers in weight order.
     priority_list = _get_providers_by_priority()
+    if category:
+        preferred = CATEGORY_PREFERRED.get(category)
+        if preferred in priority_list:
+            priority_list.remove(preferred)
+            priority_list.insert(0, preferred)
     attempted = []
     
     for prov in priority_list:
