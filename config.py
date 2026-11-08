@@ -67,11 +67,7 @@ LLM_PROVIDERS = {
         "top_p": 0.85,
         "requests_per_minute": 10,
         "enabled": True,
-<<<<<<< Updated upstream
         "weight": 5,
-=======
-        "weight": 7,
->>>>>>> Stashed changes
     },
     # Fallback: DeepSeek deepseek-flash (V4.1 Flash). NOT free — pay per
     # token, ~$0.15 in / $0.60 out per 1M tokens off-peak (~$0.0004/post).
@@ -86,7 +82,7 @@ LLM_PROVIDERS = {
         "top_p": 0.9,
         "requests_per_minute": 10,
         "enabled": True,
-        "weight": 4,
+        "weight": 1,
     },
     "nvidia_nim": {
         "api_key": NVIDIA_NIM_API_KEY,
@@ -97,7 +93,7 @@ LLM_PROVIDERS = {
         "top_p": 0.85,
         "requests_per_minute": 10,
         "enabled": True,
-        "weight": 5,
+        "weight": 4,
     },
 }
 

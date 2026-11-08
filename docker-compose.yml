@@ -1,0 +1,7 @@
+services:
+  sq-alpha:
+    build: .
+    container_name: sq-alpha-app
+    restart: "no"
+    env_file:
+      - ~/.env
