@@ -121,7 +121,7 @@ def post_to_square(content):
     payload = {"bodyTextOnly": cleaned}
     
     try:
-        r = requests.post(BINANCE_SQUARE_URL, headers=headers, json=payload, timeout=15, verify=False)
+        r = requests.post(BINANCE_SQUARE_URL, headers=headers, json=payload, timeout=15)
         
         if r.status_code == 200:
             result = r.json()

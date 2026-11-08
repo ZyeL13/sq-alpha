@@ -5,12 +5,9 @@ import requests
 import json
 import os
 import certifi
-import urllib3
 from typing import List, Dict, Any
 from config import STABLE_BLACKLIST, FIRST_SEEN_FILE
 import logging_config
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TERMUX_CERT = "/data/data/com.termux/files/usr/etc/tls/cert.pem"
 
@@ -20,10 +17,12 @@ def _ssl_verify():
         return TERMUX_CERT
     try:
         return certifi.where()
-    except Exception:
-        return False
+    except Exception as e:
+        # Never fall back to unverified TLS: fail loudly instead of
+        # silently sending requests over an untrusted connection.
+        raise RuntimeError("No CA bundle available for SSL verification") from e
 
-_VERIFY = False
+_VERIFY = _ssl_verify()
 
 logger = logging_config.get_logger("binance")
 
@@ -143,13 +142,9 @@ def fetch_binance_tickers(retries: int = 3) -> List[Dict[str, Any]]:
                 time.sleep(5 * (attempt + 1))
             except requests.exceptions.SSLError as e:
                 logger.error(f"SSL Error on {url}: {e}")
-                try:
-                    resp = requests.get(url, timeout=30, headers=headers, verify=False)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    logger.warning(f"SSL verification disabled for {url}")
-                except:
-                    pass
+                # Do NOT retry with verification disabled: an SSL failure
+                # means the connection cannot be trusted. Let the retry
+                # loop try again with verification still enabled.
                 time.sleep(5)
             except Exception as e:
                 logger.error(f"Error on {url}: {e}")
