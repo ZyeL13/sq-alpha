@@ -47,7 +47,6 @@ def test_classify_hot_gainers_losers():
     assert classify(_token(volume_rank=50, price_change_percent=-5.0)) == "LOSERS"
 
 
-@pytest.mark.xfail(reason="Fase 1 bug: market_cap=0 is treated as small cap; fixed in Fase 3 langkah 4", strict=True)
 def test_classify_alpha_needs_real_market_cap():
     from processors.classify import classify
 

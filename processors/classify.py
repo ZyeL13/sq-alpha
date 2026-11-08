@@ -34,7 +34,7 @@ def classify(token: Dict[str, Any]) -> Optional[str]:
     
     chg = token.get("price_change_percent", 0)
     vol_rank = token.get("volume_rank", 999)
-    mcap = token.get("market_cap", 0)
+    mcap = token.get("market_cap") or 0
     volume = token.get("volume_24h", 0)
     
     # HOT: top volume, small price change (anomaly)
@@ -49,8 +49,9 @@ def classify(token: Dict[str, Any]) -> Optional[str]:
     if chg < LOSER_THRESHOLD:
         return "LOSERS"
     
-    # ALPHA: small cap with decent volume
-    if mcap < ALPHA_MAX_MCAP and volume > ALPHA_MIN_VOLUME:
+    # ALPHA: small cap with decent volume. market_cap MUST be known (> 0):
+    # Binance tokens carry no mcap, so 0 here means "unknown", not "small".
+    if mcap > 0 and mcap < ALPHA_MAX_MCAP and volume > ALPHA_MIN_VOLUME:
         return "ALPHA"
     
     return None

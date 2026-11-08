@@ -171,27 +171,48 @@ def get_coin_detail(coin_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def enrich_binance_token(binance_token: Dict[str, Any]) -> Dict[str, Any]:
+def enrich_binance_token(binance_token: Dict[str, Any],
+                         top_coins: List[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Enrich Binance token data with CoinGecko information.
-    Matches by symbol.
+    Matches by symbol. Sets `market_cap` (used by classify() for ALPHA)
+    in addition to the `coingecko_*` fields.
+    Pass top_coins to avoid one API call per token; otherwise fetched here.
     """
     symbol = binance_token.get("symbol", "").lower()
-    
+
     # Get top coins for matching
-    top_coins = get_top_coins_market_data(limit=250)
-    
+    if top_coins is None:
+        top_coins = get_top_coins_market_data(limit=250)
+
     for gecko_coin in top_coins:
         if gecko_coin['symbol'].lower() == symbol:
             # Merge data
             enriched = binance_token.copy()
-            enriched['coingecko_market_cap'] = gecko_coin.get('market_cap')
+            mcap = gecko_coin.get('market_cap')
+            enriched['coingecko_market_cap'] = mcap
+            # classify() reads `market_cap` — this was missing before, which
+            # made every Binance token look like a small cap (mcap 0).
+            if mcap:
+                enriched['market_cap'] = mcap
             enriched['coingecko_price_change'] = gecko_coin.get('price_change_24h')
             enriched['coingecko_volume'] = gecko_coin.get('volume_24h')
             enriched['enriched_by'] = 'coingecko'
             return enriched
-    
+
     return binance_token
+
+
+def enrich_tokens(tokens: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Batch-enrich Binance tokens with CoinGecko market caps.
+
+    One API call (top 250 coins, cached 5 min) for the whole batch,
+    instead of one call per token.
+    """
+    if not tokens:
+        return tokens
+    top_coins = get_top_coins_market_data(limit=250)
+    return [enrich_binance_token(t, top_coins=top_coins) for t in tokens]
 
 
 def get_trending_coins() -> List[Dict[str, Any]]:

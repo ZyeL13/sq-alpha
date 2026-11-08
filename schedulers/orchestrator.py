@@ -8,13 +8,15 @@ from datetime import datetime
 from collections import deque
 
 from collectors.binance import fetch_all_binance, fetch_new_listings
+from collectors.coingecko import enrich_tokens
+from collectors.coinmarketcap import enrich_tokens_cmc
 from collectors.rss_news import fetch_all_news, get_catalyst_summary
 from processors.normalize import normalize_token
 from processors.classify import classify
 from processors.dedupe import is_duplicate, mark_posted, clear_old_entries
 from generators.post_generator import generate_post
 from schedulers.poster import post_to_targets
-from config import PROCESSOR_WORKERS
+from config import PROCESSOR_WORKERS, COINGECKO_ENABLED
 from schedulers.timing import get_post_delay, get_current_session
 from storage.post_counter import can_post, DAILY_POST_LIMIT, get_today_posts, get_seconds_until_reset
 import logging_config
@@ -101,6 +103,18 @@ def collector_worker():
             refresh_news_cache()
             binance_tokens = fetch_all_binance(limit=200)
             new_listings = fetch_new_listings()
+
+            # Enrich market caps (needed for ALPHA classification).
+            # CoinGecko first (one cached call for the batch); CoinMarketCap
+            # only fills symbols CoinGecko missed, and is a no-op without
+            # CMC_API_KEY. Any failure leaves tokens unenriched — classify()
+            # then simply skips ALPHA instead of misclassifying.
+            try:
+                if COINGECKO_ENABLED:
+                    binance_tokens = enrich_tokens(binance_tokens)
+                binance_tokens = enrich_tokens_cmc(binance_tokens)
+            except Exception as e:
+                logger.warning(f"Market-cap enrichment failed: {e}")
 
             for token in binance_tokens:
                 full_symbol = token.get("full_symbol", "")
