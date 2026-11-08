@@ -134,12 +134,19 @@ LOSER_THRESHOLD = -3.0
 ALPHA_MAX_MCAP = 5_000_000
 ALPHA_MIN_VOLUME = 50_000
 
-# ========== SCORING WEIGHTS (unused, reserved) ==========
+# ========== SCORING WEIGHTS ==========
+# Used by processors/score.py total_score(). Weights sum to 1.0.
 MOMENTUM_WEIGHT = 0.25
 ANOMALY_WEIGHT = 0.30
 WALLET_WEIGHT = 0.20
 LIQUIDITY_WEIGHT = 0.15
 FRESHNESS_WEIGHT = 0.10
+
+# Minimum score to generate a post (see processors/score.py score_token).
+# Calibrated on sample tokens: HOT ~0.63, GAINERS ~0.43, ALPHA ~0.38,
+# new listing ~0.53, junk low-volume flat ~0.30 (rejected).
+MIN_TOTAL_SCORE = 0.35
+MIN_PRIMARY_SCORE = 0.60
 
 # ========== COOLDOWN CONFIG ==========
 # Market cap tiers (in USD)

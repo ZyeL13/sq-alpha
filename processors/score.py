@@ -2,6 +2,16 @@
 import math
 from typing import Dict, Any
 
+from config import (
+    MOMENTUM_WEIGHT,
+    ANOMALY_WEIGHT,
+    WALLET_WEIGHT,
+    LIQUIDITY_WEIGHT,
+    FRESHNESS_WEIGHT,
+    MIN_TOTAL_SCORE,
+    MIN_PRIMARY_SCORE,
+)
+
 def momentum_score(token: Dict[str, Any]) -> float:
     """Score based on price momentum (0-1)"""
     chg = token.get("price_change_percent", 0)
@@ -112,14 +122,46 @@ def compute_scores(token: Dict[str, Any]) -> Dict[str, float]:
 
 
 def get_primary_score(category: str, scores: Dict[str, float]) -> float:
-    """Get the most relevant score for a category"""
+    """Get the most relevant score for a category.
+
+    LOSERS is inverted: momentum maps a big drop to a low value, but for
+    a LOSERS post a big drop is exactly the signal, so use 1 - momentum.
+    """
+    if category == "LOSERS":
+        return 1.0 - scores.get("momentum", 0.5)
     primary_map = {
         "HOT": "anomaly",
         "GAINERS": "momentum",
-        "LOSERS": "momentum",
         "NEW": "freshness",
         "ALPHA": "wallet",
         "SIGNAL": "wallet",
     }
     key = primary_map.get(category, "anomaly")
     return scores.get(key, 0.5)
+
+
+def total_score(scores: Dict[str, float]) -> float:
+    """Weighted total from the config weights (they sum to 1.0)."""
+    weights = {
+        "momentum": MOMENTUM_WEIGHT,
+        "anomaly": ANOMALY_WEIGHT,
+        "wallet": WALLET_WEIGHT,
+        "liquidity": LIQUIDITY_WEIGHT,
+        "freshness": FRESHNESS_WEIGHT,
+    }
+    return sum(scores.get(k, 0.0) * w for k, w in weights.items())
+
+
+def score_token(token: Dict[str, Any], category: str) -> Dict[str, Any]:
+    """Score one token for a category and decide if it is worth posting.
+
+    Passes when the weighted total clears MIN_TOTAL_SCORE, or when the
+    category's primary signal is strong (MIN_PRIMARY_SCORE) even if the
+    total is low — e.g. a LOSERS token whose momentum drags the total
+    down but whose drop itself is the story.
+    """
+    scores = compute_scores(token)
+    total = total_score(scores)
+    primary = get_primary_score(category, scores)
+    passes = total >= MIN_TOTAL_SCORE or primary >= MIN_PRIMARY_SCORE
+    return {"scores": scores, "total": total, "primary": primary, "passes": passes}

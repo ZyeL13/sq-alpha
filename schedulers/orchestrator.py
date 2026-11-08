@@ -13,6 +13,7 @@ from collectors.coinmarketcap import enrich_tokens_cmc
 from collectors.rss_news import fetch_all_news, get_catalyst_summary
 from processors.normalize import normalize_token
 from processors.classify import classify
+from processors.score import score_token
 from processors.dedupe import is_duplicate, mark_posted, clear_old_entries
 from generators.post_generator import generate_post
 from schedulers.poster import post_to_targets
@@ -164,16 +165,28 @@ def processor_worker(worker_id: int):
             
             if cat and can_post():
                 try:
+                    # Score gate: skip tokens whose signal is too weak to
+                    # be worth a post (see processors/score.py).
+                    scored = score_token(token, cat)
+                    if not scored["passes"]:
+                        print(f"  🚫 P{worker_id}: {token['symbol']} → {cat} "
+                              f"(score too low: total={scored['total']:.2f}, "
+                              f"primary={scored['primary']:.2f})")
+                        audit_logger.info(
+                            f"SCORE_REJECTED|{token['symbol']}|{cat}|"
+                            f"total={scored['total']:.2f}|primary={scored['primary']:.2f}")
+                        continue
+
                     hook = get_hook(cat) or "default"
                     market_cap = token.get("market_cap", 0)
-                    
+
                     if is_duplicate(token["symbol"], cat, market_cap, hook):
                         continue
-                    
+
                     if "news_catalyst" in raw:
                         token["news_catalyst"] = raw["news_catalyst"]
-                    
-                    post = generate_post(token, cat, {})
+
+                    post = generate_post(token, cat, scored["scores"])
                     if post:
                         current_time = time.time()
                         scheduled_queue = ScheduledPostQueue()
