@@ -1,0 +1,29 @@
+# sq-alpha — satu container untuk seluruh pipeline.
+# Jalankan:  docker compose up -d --build
+# Berhenti:   docker compose down        (state tetap ada di ./storage, ./cache, ./logs)
+# Lihat log:  docker compose logs -f
+services:
+  sq-alpha:
+    build: .
+    container_name: sq-alpha
+    # .env diisi dari file di host (jangan commit .env). Lihat .env.example.
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Jakarta
+      # BlockRun proxy runs on the HOST (port 8402), not in this
+      # container — 127.0.0.1 inside the container is the container
+      # itself. host.docker.internal reaches the host (needs the
+      # extra_hosts mapping below on Linux).
+      - BLOCKRUN_API_URL=http://host.docker.internal:8402/v1/chat/completions
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # State persisten — WAJIB bind-mount, kalau tidak, riwayat post, dedupe,
+    # dan antrean hilang tiap container dibuat ulang dan bot bisa double-post.
+    volumes:
+      - ./storage:/app/storage # antrean SQLite (queue.db, scheduled_queue.db)
+      - ./cache:/app/cache     # dedupe, post counter, news dedupe/review, first_seen
+      - ./logs:/app/logs       # log pipeline
+    command: ["python", "main.py", "pipeline"]
+    restart: unless-stopped
+    # Tidak ada port: bot ini worker, bukan server HTTP.

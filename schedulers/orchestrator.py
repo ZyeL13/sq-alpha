@@ -8,14 +8,23 @@ from collections import deque
 from collectors.binance import fetch_all_binance, fetch_new_listings
 from collectors.coingecko import enrich_tokens
 from collectors.coinmarketcap import enrich_tokens_cmc
-from collectors.rss_news import fetch_all_news, get_catalyst_summary
+from collectors.rss_news import fetch_all_news, get_catalyst_summary, assign_news_to_tokens, find_big_unmatched, suggest_review_cashtag
+from storage.news_dedup import is_news_seen, mark_news_used, clear_old_news_entries
+from storage.news_review import queue_for_review
 from processors.normalize import normalize_token
 from processors.classify import classify
 from processors.score import score_token
 from processors.dedupe import is_duplicate, mark_posted, clear_old_entries
 from generators.post_generator import generate_post
 from schedulers.poster import post_to_targets
-from config import PROCESSOR_WORKERS, COINGECKO_ENABLED, WIB
+from config import (
+    PROCESSOR_WORKERS,
+    COINGECKO_ENABLED,
+    WIB,
+    RSS_ENABLED,
+    RSS_REFRESH_INTERVAL,
+    RSS_MAX_ARTICLES_PER_SOURCE,
+)
 from schedulers.timing import get_post_delay, get_current_session
 from storage.post_counter import can_post, DAILY_POST_LIMIT, get_today_posts, get_seconds_until_reset
 import logging_config
@@ -37,10 +46,10 @@ audit_logger = get_audit_logger()
 # Rate limiter untuk poster
 _post_times = deque(maxlen=10)
 
-# News cache
+# News cache (interval & jumlah artikel diambil dari config.py —
+# RSS_REFRESH_INTERVAL / RSS_MAX_ARTICLES_PER_SOURCE / RSS_ENABLED).
 _news_cache = []
 _last_news_refresh = 0
-NEWS_REFRESH_INTERVAL = 600  # 10 minutes
 
 
 def can_post_now(min_interval: int = 10):
@@ -108,12 +117,14 @@ def check_and_sleep():
 
 
 def refresh_news_cache():
-    """Refresh news cache if needed"""
+    """Refresh news cache if needed (no-op when RSS_ENABLED is False)"""
     global _news_cache, _last_news_refresh
+    if not RSS_ENABLED:
+        return _news_cache
     now = time.time()
-    if now - _last_news_refresh > NEWS_REFRESH_INTERVAL:
+    if now - _last_news_refresh > RSS_REFRESH_INTERVAL:
         print("  📰 Refreshing news cache...")
-        _news_cache = fetch_all_news()
+        _news_cache = fetch_all_news(max_per_source=RSS_MAX_ARTICLES_PER_SOURCE)
         _last_news_refresh = now
         print(f"  📰 News cache updated: {len(_news_cache)} articles")
     return _news_cache
@@ -144,14 +155,40 @@ def collector_worker():
             except Exception as e:
                 logger.warning(f"Market-cap enrichment failed: {e}")
 
+            # Satu event berita -> satu token paling relevan saja.
+            # Artikel yang sudah pernah dipakai sebagai katalis tidak
+            # ditempel lagi (feed RSS menampilkan 5 teratas berjam-jam,
+            # jadi tanpa ini berita yang sama menempel tiap siklus).
+            # Artikel ditandai "dipakai" saat ditempel di sini, bukan
+            # saat post terbit: ini menjamin satu event maksimal satu
+            # post. Trade-off yang diterima: kalau token yang mengklaim
+            # lalu gagal di score gate/dedupe, event itu hangus dan
+            # tidak dicoba ke token lain.
+            news_assignment = assign_news_to_tokens(
+                [t.get("symbol", "") for t in binance_tokens], _news_cache)
+            # Berita besar yang tidak cocok ke token mana pun masuk
+            # antrean review untuk user — tidak auto-post (Langkah 7).
+            for article in find_big_unmatched(_news_cache, news_assignment):
+                if queue_for_review(article, suggest_review_cashtag(article)):
+                    print(f"  👀 Review queue: {article.get('title', '')[:80]}")
             for token in binance_tokens:
                 full_symbol = token.get("full_symbol", "")
                 symbol = token.get("symbol", "")
                 token["age_hours"] = 12 if full_symbol in new_listings else 100
-                
-                catalyst = get_catalyst_summary(symbol, _news_cache)
-                if catalyst:
-                    token["news_catalyst"] = catalyst
+
+                assigned = [a for a in news_assignment.get(symbol, [])
+                            if not is_news_seen(a)]
+                if assigned:
+                    catalyst = get_catalyst_summary(symbol, assigned)
+                    if catalyst:
+                        token["news_catalyst"] = catalyst
+                        # Snapshot harga/volume SAAT berita ditempel —
+                        # dipakai di prompt untuk membandingkan dengan
+                        # harga/volume saat post di-generate (Langkah 6).
+                        token["price_at_news"] = token.get("price", 0)
+                        token["volume_at_news"] = token.get("volume_24h", 0)
+                        for article in assigned[:2]:
+                            mark_news_used(article, symbol)
 
             queued = 0
             for token in binance_tokens:
@@ -163,6 +200,7 @@ def collector_worker():
             print(f"  📰 News cache age: {int(time.time() - _last_news_refresh)}s, {len(_news_cache)} articles")
 
             clear_old_entries()
+            clear_old_news_entries()
             time.sleep(60)
 
         except Exception as e:
@@ -213,6 +251,11 @@ def processor_worker(worker_id: int):
                     if "news_catalyst" in raw:
                         token["news_catalyst"] = raw["news_catalyst"]
 
+                    if "price_at_news" in raw:
+                        token["price_at_news"] = raw["price_at_news"]
+                    if "volume_at_news" in raw:
+                        token["volume_at_news"] = raw["volume_at_news"]
+
                     post = generate_post(token, cat, scored["scores"])
                     if post:
                         current_time = time.time()
@@ -220,12 +263,13 @@ def processor_worker(worker_id: int):
                         
                         last_time = scheduled_queue.get_last_post_time()
                         
+                        delay = get_post_delay()
                         if last_time and last_time > current_time:
-                            scheduled_time = last_time + get_post_delay()
-                            print(f"  📅 Last post at {last_time:.0f}, scheduling +{get_post_delay()}s")
+                            scheduled_time = last_time + delay
+                            print(f"  📅 Last post at {last_time:.0f}, scheduling +{delay}s")
                         else:
-                            scheduled_time = current_time + get_post_delay()
-                            print(f"  📅 Queue empty, scheduling in {get_post_delay()}s")
+                            scheduled_time = current_time + delay
+                            print(f"  📅 Queue empty, scheduling in {delay}s")
                         
                         session = get_current_session()
                         
@@ -340,7 +384,7 @@ def run_orchestrator():
     print("🚀 Starting Pipeline Orchestrator")
     print(f"📅 {datetime.now(WIB).strftime('%Y-%m-%d %H:%M:%S')} WIB")
     print(f"📊 Daily limit: {DAILY_POST_LIMIT} posts/day")
-    print(f"📰 News refresh interval: {NEWS_REFRESH_INTERVAL}s")
+    print(f"📰 News refresh interval: {RSS_REFRESH_INTERVAL}s")
     print(f"{'='*50}\n")
     
     audit_logger.info(f"PIPELINE_START|{datetime.now(WIB).strftime('%Y-%m-%d %H:%M:%S')}")

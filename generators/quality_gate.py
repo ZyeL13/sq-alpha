@@ -76,36 +76,28 @@ def has_double_symbol(content: str, symbol: str) -> bool:
 
 
 def clean_redundant_symbol_references(content: str, symbol: str) -> str:
-    """Remove $SYMBOL from middle, keep only first and last occurrence"""
+    """Keep the cashtag exactly once (first occurrence).
+
+    Every later $SYMBOL becomes "the token" instead of being deleted,
+    so sentences stay grammatical ("volume on the token is high",
+    "price of the token stayed") instead of breaking ("volume on is
+    high"). Only the post's own symbol is touched — other tickers
+    (e.g. $BTC in a comparison) are left alone.
+    """
     if not content or not symbol:
         return content
-    
+
     import re
     symbol_upper = symbol.upper()
-    pattern = re.compile(rf'\${re.escape(symbol_upper)}', re.IGNORECASE)
+    pattern = re.compile(rf"\${re.escape(symbol_upper)}\b", re.IGNORECASE)
     matches = list(pattern.finditer(content))
-    
-    # Hanya bersihkan jika muncul lebih dari 2 kali
-    if len(matches) <= 4:
+
+    if len(matches) <= 1:
         return content
-    
-    # Hapus hanya yang di tengah (pertahankan 2: awal dan akhir)
-    keep_indices = {matches[0].start(), matches[-1].start()}
-    result = []
-    last_end = 0
-    for match in matches:
-        start, end = match.start(), match.end()
-        if start in keep_indices:
-            result.append(content[last_end:end])
-        else:
-            # Skip this $SYMBOL, add space instead
-            result.append(content[last_end:start])
-        last_end = end
-    result.append(content[last_end:])
-    
-    cleaned = ''.join(result)
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    return cleaned
+
+    first_end = matches[0].end()
+    head, tail = content[:first_end], content[first_end:]
+    return head + pattern.sub("the token", tail)
 
 def proofread_post(content: str, symbol: str) -> str:
     """Clean up formatting, remove redundant phrases, ensure consistent CTA"""
@@ -171,15 +163,19 @@ def proofread_post(content: str, symbol: str) -> str:
     content = re.sub(r'\n{3,}', '\n\n', content)
     content = re.sub(r'\n{2,}', '\n\n', content)
     
-    # 8. Tambahkan $SYMBOL di awal jika hilang
-    if not content.startswith(f"${symbol_upper}"):
+    # 8. Tambahkan $SYMBOL di awal hanya jika tidak ada sama sekali.
+    # (Kalau ticker sudah ada di tengah, jangan tambah lagi di depan —
+    # cleaner di atas sudah memastikan ticker cuma muncul sekali.)
+    if f"${symbol_upper}" not in content.upper():
         content = f"${symbol_upper} " + content
-    
-    # 9. Tambahkan CTA di akhir jika tidak ada
+
+    # 9. Tambahkan CTA di akhir jika tidak ada — tanpa ticker.
+    # Cashtag sudah muncul sekali di baris pertama; mengulanginya di
+    # CTA ("tracking $X.") adalah salah satu sumber overuse.
     content = content.strip()
-    cta_pattern = rf'tracking \${symbol_upper}\.'
+    cta_pattern = r'tracking|watching|monitoring'
     if not re.search(cta_pattern, content, re.IGNORECASE):
-        content += f"\n\ntracking ${symbol_upper}."
+        content += "\n\ntracking the move."
     
     # 10. Perbaiki spasi ganda
     content = re.sub(r' {2,}', ' ', content)

@@ -110,12 +110,15 @@ OUTPUT RULES:
 - no drafts
 - no chain of thought
 - Never use apostrophe s after $SYMBOL. Write "$BTC" not "$BTC's"
-- Use: "price of $BTC" instead of "$BTC's price"
+- Use: "price of the token" instead of "$BTC's price"
 - Do not explain your reasoning.
 - Do not think out loud.
 - Do not narrate your process.
 - Write the post directly. Nothing before <post>, nothing after </post>.
-- Every sentence that mentions a price, volume, or percentage MUST include ${symbol} explicitly.
+- Mention ${symbol} EXACTLY ONCE, in the first line. In every later
+  sentence, refer to it as "the token" — never repeat the cashtag, not
+  even in sentences about price, volume, or percentages, and not in the
+  closing line. Repeating the ticker reads as spam.
 
 FORBIDDEN PHRASES:
 - under the surface
@@ -134,13 +137,14 @@ FORBIDDEN PHRASES:
 
 
 CTA STYLE:
-Soft only.
+Soft only. The closing line must NOT repeat the cashtag — the ticker
+already appears once in the first line.
 
 Good:
-- tracking $TOKEN.
-- watching $TOKEN.
-- $TOKEN on watchlist.
-- monitoring $TOKEN.
+- tracking the move.
+- watching from here.
+- on watchlist for now.
+- monitoring the session.
 
 Bad:
 - buy now

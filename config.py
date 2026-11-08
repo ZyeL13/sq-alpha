@@ -27,6 +27,8 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 # Cache files
 DEDUP_FILE = f"{CACHE_DIR}/dedup_cache.json"
+NEWS_DEDUP_FILE = f"{CACHE_DIR}/news_dedup.json"
+NEWS_REVIEW_FILE = f"{CACHE_DIR}/news_review.json"
 POST_COUNTER_FILE = f"{CACHE_DIR}/post_counter.json"
 FIRST_SEEN_FILE = f"{CACHE_DIR}/first_seen.json"
 COINGECKO_CACHE_FILE = f"{CACHE_DIR}/coingecko_cache.json"
@@ -43,35 +45,83 @@ STABLE_BLACKLIST = {
 }
 
 # ========== MULTI LLM PROVIDERS ==========
+# Priority: BlockRun (free, local proxy) > Groq (free) > NVIDIA NIM (free).
+# DeepSeek is OFF until topped up. Providers with an empty api_key are
+# skipped automatically (llm._get_providers_by_priority), so DeepSeek
+# also stays out of the rotation while its key is empty.
 LLM_PROVIDERS = {
+    # BlockRun (ClawRouter) local proxy — free models, wallet $0.
+    # The proxy must be running on the host (port 8402). Inside Docker
+    # 127.0.0.1 is the container itself, so set BLOCKRUN_API_URL to
+    # http://host.docker.internal:8402/v1/chat/completions (see
+    # docker-compose.yml). Model IDs are the exact IDs from the proxy's
+    # /v1/models output (2026-11-09, 14 free models) — "free" alone is
+    # NOT a valid model ID. Three entries = in-provider fallback:
+    # deepseek-v4-flash, then llama-4-maverick, then mistral-large-3.
     "blockrun": {
         "api_key": "not-needed",
-        "api_url": "http://127.0.0.1:8402/v1/chat/completions",
-        "model": "free",
+        "api_url": os.getenv(
+            "BLOCKRUN_API_URL", "http://127.0.0.1:8402/v1/chat/completions"
+        ),
+        "model": "free/deepseek-v4-flash",
         "max_tokens": 555,
         "temperature": 0.55,
         "top_p": 0.9,
         "requests_per_minute": 10,
-        "enabled": False,
-        "weight": 1,
+        "enabled": True,
+        "weight": 6,
     },
-    # Primary: Groq Free plan (no card) — openai/gpt-oss-120b,
+    "blockrun_llama": {
+        "api_key": "not-needed",
+        "api_url": os.getenv(
+            "BLOCKRUN_API_URL", "http://127.0.0.1:8402/v1/chat/completions"
+        ),
+        "model": "free/llama-4-maverick",
+        "max_tokens": 555,
+        "temperature": 0.55,
+        "top_p": 0.9,
+        "requests_per_minute": 10,
+        "enabled": True,
+        "weight": 5.5,
+    },
+    "blockrun_mistral": {
+        "api_key": "not-needed",
+        "api_url": os.getenv(
+            "BLOCKRUN_API_URL", "http://127.0.0.1:8402/v1/chat/completions"
+        ),
+        "model": "free/mistral-large-3-675b",
+        "max_tokens": 555,
+        "temperature": 0.55,
+        "top_p": 0.9,
+        "requests_per_minute": 10,
+        "enabled": True,
+        "weight": 5.25,
+    },
+    # Groq Free plan (no card) — openai/gpt-oss-120b,
     # 30 RPM / 1,000 RPD / 200k tokens/day. llama-3.3-70b-versatile was
     # decommissioned by Groq on 2026-08-16 (404 model_not_found).
+    # gpt-oss is a reasoning model: its reasoning tokens come out of the
+    # same max_tokens budget as the answer, so 600 starved it and Groq
+    # returned empty content ("Invalid content type" in llm.py).
+    # reasoning_effort=low + 1800 budget leaves room for the answer;
+    # include_reasoning=false keeps the reasoning trace out of the reply.
     "groq": {
         "api_key": GROQ_API_KEY,
         "api_url": "https://api.groq.com/openai/v1/chat/completions",
         "model": "openai/gpt-oss-120b",
-        "max_tokens": 600,
+        "max_tokens": 1800,
         "temperature": 0.69,
         "top_p": 0.85,
         "requests_per_minute": 10,
+        "reasoning_effort": "low",
+        "include_reasoning": False,
         "enabled": True,
         "weight": 5,
     },
-    # Fallback: DeepSeek deepseek-flash (V4.1 Flash). NOT free — pay per
+    # DeepSeek deepseek-flash (V4.1 Flash). NOT free — pay per
     # token, ~$0.15 in / $0.60 out per 1M tokens off-peak (~$0.0004/post).
-    # deepseek-v4-flash is a legacy alias; deepseek-flash is canonical.
+    # Disabled until topped up (2026-11-09). deepseek-v4-flash is a
+    # legacy alias; deepseek-flash is canonical.
     # Note: thinking_mode was removed — it was never sent in the payload.
     "deepseek": {
         "api_key": DEEPSEEK_API_KEY,
@@ -81,28 +131,37 @@ LLM_PROVIDERS = {
         "temperature": 0.69,
         "top_p": 0.9,
         "requests_per_minute": 10,
-        "enabled": True,
+        "enabled": False,
         "weight": 4,
     },
+    # NVIDIA NIM free tier (nvapi- key, no card).
+    # meta/llama-3.3-70b-instruct retired 2026-08-26 (HTTP 410 Gone).
+    # DISABLED until a replacement is verified against the live list:
+    #   curl https://integrate.api.nvidia.com/v1/models \
+    #     -H "Authorization: Bearer $NVIDIA_NIM_API_KEY"
+    # then set "model" to an ID from that output and flip enabled on.
+    # (Candidate seen in NVIDIA's Nov-2026 free-tier listing:
+    # nvidia/nemotron-3-ultra-550b-a55b — NOT live-verified, do not
+    # enable on that basis alone.)
     "nvidia_nim": {
         "api_key": NVIDIA_NIM_API_KEY,
         "api_url": "https://integrate.api.nvidia.com/v1/chat/completions",
-        "model": "meta/llama-3.3-70b-instruct",
+        "model": "nvidia/nemotron-3-ultra-550b-a55b",
         "max_tokens": 600,
         "temperature": 0.69,
         "top_p": 0.85,
         "requests_per_minute": 10,
         "enabled": False,
-        "weight": 5,
+        "weight": 3,
     },
 }
 
 # Category to preferred provider (tried first, then weight order)
 CATEGORY_PREFERRED = {
-    "HOT": "groq",
-    "ALPHA": "groq",
-    "GAINERS": "groq",
-    "LOSERS": "groq",
+    "HOT": "blockrun",
+    "ALPHA": "blockrun",
+    "GAINERS": "blockrun",
+    "LOSERS": "blockrun",
 }
 
 # ========== POST MODE ==========
@@ -111,7 +170,7 @@ POST_MODE = "rebate"
 # ========== PIPELINE SETTINGS ==========
 COLLECTOR_INTERVAL = 60      # seconds between fetches
 PROCESSOR_WORKERS = 1        # number of processor threads
-DAILY_POST_LIMIT = 100       # Binance Square limit
+DAILY_POST_LIMIT = 10        # operator target: max 10/day (Binance API ceiling is 100)
 
 # ========== DEDUPLICATION ==========
 DEDUP_TTL_HOURS = 12         # hours before token can repeat in same category
@@ -124,7 +183,7 @@ COINGECKO_RATE_LIMIT_SECONDS = 6
 # ========== RSS NEWS CONFIG ==========
 RSS_ENABLED = True
 RSS_MAX_ARTICLES_PER_SOURCE = 5
-RSS_REFRESH_INTERVAL = 300   # seconds
+RSS_REFRESH_INTERVAL = 120   # seconds (3 sumber x tiap 2 mnt = ~90 req/jam, aman untuk RSS)
 
 # ========== CLASSIFICATION THRESHOLDS ==========
 # HOT: low perform, kurangi porsi
@@ -184,7 +243,7 @@ MIN_POST_INTERVAL_SECONDS = 10
 SIMILARITY_THRESHOLD = 0.65
 
 # ========== DAILY TARGET ==========
-DAILY_POST_TARGET = 70  # soft limit
+DAILY_POST_TARGET = 10  # soft limit (generation stops here; hard limit above is the backstop)
 
 # ========== CLOSER SETTINGS ==========
 CLOSER_ENABLED = False  # True untuk aktif, False untuk mati

@@ -18,6 +18,43 @@ if not audit_logger.handlers:
     audit_logger.addHandler(audit_handler)
 
 
+def _fmt_price(price: float) -> str:
+    """Format harga dengan presisi yang sama seperti data anchor."""
+    if price < 0.001:
+        return f"${price:.7f}"
+    if price < 1:
+        return f"${price:.4f}"
+    return f"${price:.2f}"
+
+
+def news_price_context(token: Dict[str, Any]) -> str:
+    """Perbandingan harga/volume saat berita ditempel vs sekarang.
+
+    Kedua angka berasal dari ticker 24h Binance: harga/volume saat
+    collector menempel katalis vs saat post di-generate. Volume 24h
+    adalah angka rolling, jadi yang dibandingkan adalah "volume 24h
+    saat itu vs sekarang" — bukan volume pada menit berita keluar.
+    Kembalikan "" kalau tidak ada snapshot (token tanpa katalis, atau
+    snapshot 0) supaya prompt tidak mengandung angka karangan.
+    """
+    if not token.get("news_catalyst"):
+        return ""
+    price_then = token.get("price_at_news", 0) or 0
+    price_now = token.get("price", 0) or 0
+    if not price_then or not price_now:
+        return ""
+    chg = (price_now - price_then) / price_then * 100
+    parts = [f"price at news time {_fmt_price(price_then)}, "
+             f"now {_fmt_price(price_now)} ({chg:+.1f}%)"]
+    vol_then = token.get("volume_at_news", 0) or 0
+    vol_now = token.get("volume_24h", 0) or 0
+    if vol_then and vol_now:
+        vol_chg = (vol_now - vol_then) / vol_then * 100
+        parts.append(f"24h volume at news time ${vol_then / 1_000_000:.1f}M, "
+                     f"now ${vol_now / 1_000_000:.1f}M ({vol_chg:+.1f}%)")
+    return "news price context: " + "; ".join(parts)
+
+
 def build_prompt(token: Dict[str, Any], category: str) -> str:
     symbol = token["symbol"]
     price = token.get("price", 0)
@@ -27,6 +64,8 @@ def build_prompt(token: Dict[str, Any], category: str) -> str:
     data_anchor = generate_data_anchor(symbol, price, chg, volume_raw)
     news = token.get("news_catalyst", "")
     news_context = f"\nrelevant news: {news}" if news else ""
+    price_context = news_price_context(token)
+    price_context_line = f"\n{price_context}" if price_context else ""
 
     if range_pos >= 0.85:
         range_context = f"${symbol} trading near 24h high."
@@ -40,6 +79,8 @@ def build_prompt(token: Dict[str, Any], category: str) -> str:
         data_section += f"\n{range_context}"
     if news_context:
         data_section += news_context
+    if price_context_line:
+        data_section += price_context_line
 
     hook = get_hook(category)
     angle = get_angle()
@@ -92,7 +133,7 @@ RULES:
 - Insert a blank line between every paragraph.
 - Keep visual rhythm clean and easy to scan.
 - Avoid dense walls of text.
-- Always refer to the token as ${symbol} (with $ prefix, uppercase). Never drop the symbol mid-sentence.
+- Refer to the token as ${symbol} (with $ prefix, uppercase) exactly ONCE, in the first line. In every later sentence use "the token" — never repeat the cashtag.
 - Never repeat the hook line anywhere else in the post.
 - End with exactly ONE closing line. Do not add any sentence after the closing line.
 
@@ -138,8 +179,10 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
     content = clean_redundant_symbol_references(content, symbol)
     content = proofread_post(content, symbol)
 
-    # Ensure $SYMBOL at start
-    if not content.startswith(f"${symbol}"):
+    # Ensure $SYMBOL present — but only add it if absent entirely.
+    # Prepending when the ticker already sits mid-post would create
+    # a second occurrence (the cleaner above already ran).
+    if f"${symbol}" not in content.upper():
         content = f"${symbol} " + content
 
     # Check similarity with recent posts

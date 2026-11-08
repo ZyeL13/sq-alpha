@@ -33,9 +33,12 @@ def _token(**overrides):
 def test_config_loads():
     import config
 
-    assert config.DAILY_POST_LIMIT == 100
-    assert config.DAILY_POST_TARGET == 70
-    assert set(config.LLM_PROVIDERS) == {"blockrun", "groq", "deepseek", "nvidia_nim"}
+    assert config.DAILY_POST_LIMIT == 10
+    assert config.DAILY_POST_TARGET == 10
+    assert set(config.LLM_PROVIDERS) == {
+        "blockrun", "blockrun_llama", "blockrun_mistral",
+        "groq", "deepseek", "nvidia_nim",
+    }
     assert config.ALPHA_MAX_MCAP == 5_000_000
 
 
@@ -87,7 +90,7 @@ def test_timing_delay_range():
     from schedulers.timing import get_post_delay, get_current_session
 
     assert get_current_session() in {"asia", "europe", "overlap", "us_late", "night"}
-    assert 450 <= get_post_delay() <= 750
+    assert 4500 <= get_post_delay() <= 5400  # 75-90 min gap between posts
 
 
 def test_dedupe_roundtrip(tmp_path):
@@ -160,11 +163,17 @@ def test_quality_gate_rejects_reasoning_leak_and_accepts_valid():
     assert "Reasoning leak" in reason
 
 
-def test_llm_providers_enabled_groq_first():
-    """Fase 3 langkah 3: Groq (free) is primary, DeepSeek is fallback.
+def test_llm_providers_enabled_blockrun_first(monkeypatch):
+    """Priority: BlockRun models (free proxy) > Groq (free).
 
-    Previously all providers were disabled and this list was empty.
+    DeepSeek is disabled until topped up; NVIDIA NIM is disabled until
+    a live replacement model is verified. Keys are stubbed so the test
+    does not depend on ambient env vars.
     """
-    from llm import _get_providers_by_priority
+    import llm
 
-    assert _get_providers_by_priority() == ["groq", "deepseek"]
+    for name in ("blockrun", "blockrun_llama", "blockrun_mistral", "groq"):
+        monkeypatch.setitem(llm.LLM_PROVIDERS[name], "api_key", "test-key")
+    assert llm._get_providers_by_priority() == [
+        "blockrun", "blockrun_llama", "blockrun_mistral", "groq",
+    ]
