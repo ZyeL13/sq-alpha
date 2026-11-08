@@ -2,10 +2,12 @@
 import random
 from datetime import datetime
 
+from config import WIB
+
 # WIB (UTC+7)
 def get_current_session() -> str:
     """Return current trading session based on WIB time"""
-    hour = datetime.now().hour
+    hour = datetime.now(WIB).hour
     if 7 <= hour < 12:
         return "asia"
     elif 12 <= hour < 17:

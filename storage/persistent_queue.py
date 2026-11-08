@@ -3,6 +3,7 @@ import sqlite3
 import json
 import time
 import threading
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
 class PersistentQueue:
@@ -106,9 +107,16 @@ class PersistentQueue:
         return self.size() >= max_size
 
     def delete_old_entries(self, max_age_hours: int = 24):
-        """Delete entries older than max_age_hours"""
+        """Delete entries older than max_age_hours.
+
+        created_at is a TEXT timestamp from SQLite CURRENT_TIMESTAMP
+        (UTC, 'YYYY-MM-DD HH:MM:SS'), so the cutoff must be the same
+        format — the old epoch-float cutoff never matched anything,
+        because SQLite orders TEXT above numbers.
+        """
         with self._lock:
-            cutoff = time.time() - (max_age_hours * 3600)
+            cutoff = (datetime.now(timezone.utc)
+                      - timedelta(hours=max_age_hours)).strftime("%Y-%m-%d %H:%M:%S")
             conn = sqlite3.connect(self.db_path, check_same_thread=False)
             cursor = conn.execute("DELETE FROM queue WHERE created_at < ?", (cutoff,))
             deleted = cursor.rowcount

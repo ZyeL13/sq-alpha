@@ -3,13 +3,15 @@ import logging
 import os
 from datetime import datetime
 
+from config import WIB
+
 # Buat folder logs jika belum ada
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Nama file log berdasarkan tanggal
-LOG_FILE = f"{LOG_DIR}/pipeline_{datetime.now().strftime('%Y%m%d')}.log"
-AUDIT_FILE = f"{LOG_DIR}/audit_{datetime.now().strftime('%Y%m%d')}.log"  # TAMBAHKAN
+# Nama file log berdasarkan tanggal (WIB)
+LOG_FILE = f"{LOG_DIR}/pipeline_{datetime.now(WIB).strftime('%Y%m%d')}.log"
+AUDIT_FILE = f"{LOG_DIR}/audit_{datetime.now(WIB).strftime('%Y%m%d')}.log"  # TAMBAHKAN
 
 # Format log
 LOG_FORMAT = '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s'
@@ -44,7 +46,7 @@ def setup_logging(level=logging.INFO):
     
     # Log awal
     root_logger.info("=" * 60)
-    root_logger.info(f"Pipeline started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    root_logger.info(f"Pipeline started at {datetime.now(WIB).strftime('%Y-%m-%d %H:%M:%S')} WIB")
     root_logger.info("=" * 60)
     
     _logging_initialized = True

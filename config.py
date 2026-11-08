@@ -1,8 +1,14 @@
 # config.py — Central configuration
 import os
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# All human-facing times (daily reset, sessions, log dates) are WIB.
+# The code used to call naive datetime.now(), which follows the server's
+# local timezone — on a UTC host the "7 AM WIB" reset fired at 7 AM UTC.
+WIB = ZoneInfo("Asia/Jakarta")
 
 # ========== API KEYS ==========
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")

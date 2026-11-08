@@ -15,7 +15,7 @@ from processors.score import score_token
 from processors.dedupe import is_duplicate, mark_posted, clear_old_entries
 from generators.post_generator import generate_post
 from schedulers.poster import post_to_targets
-from config import PROCESSOR_WORKERS, COINGECKO_ENABLED
+from config import PROCESSOR_WORKERS, COINGECKO_ENABLED, WIB
 from schedulers.timing import get_post_delay, get_current_session
 from storage.post_counter import can_post, DAILY_POST_LIMIT, get_today_posts, get_seconds_until_reset
 import logging_config
@@ -25,7 +25,10 @@ from storage.scheduled_post_queue import ScheduledPostQueue
 logger = logging_config.get_logger("orchestrator")
 data_queue = PersistentQueue()
 stop_flag = threading.Event()
-_shutdown = False
+# Coordinates the daily-limit reset sleep: exactly one thread sleeps
+# until the 07:00 WIB reset, the others wait for it (see check_and_sleep).
+_reset_lock = threading.Lock()
+_reset_in_progress = threading.Event()
 
 # Setup audit logger
 from logging_config import get_audit_logger
@@ -51,31 +54,57 @@ def can_post_now(min_interval: int = 10):
 
 
 def check_and_sleep():
-    """Check if daily limit reached, sleep until reset instead of shutdown"""
-    global _shutdown
-    if not _shutdown and not can_post():
-        _shutdown = True
-        seconds_until_reset = get_seconds_until_reset()
-        hours = seconds_until_reset // 3600
-        minutes = (seconds_until_reset % 3600) // 60
-        
-        print(f"\n  🛑 DAILY LIMIT REACHED: {get_today_posts()}/{DAILY_POST_LIMIT}")
-        print(f"  📅 Reset in {hours}h {minutes}m (7 AM WIB)")
-        print(f"  💤 Sleeping {hours}h {minutes}m until reset...\n")
-        
-        audit_logger.info(f"DAILY_LIMIT|{get_today_posts()}|sleep_{hours}h{minutes}m")
-        
-        time.sleep(seconds_until_reset)
-        
-        from storage.post_counter import reset_counter
-        reset_counter()
-        
-        _shutdown = False
-        print("  🌅 New day! Resuming pipeline...\n")
-        audit_logger.info("DAILY_RESET|resumed")
-        stop_flag.clear()
-    
-    return _shutdown
+    """Check if the daily limit is reached; sleep until reset if so.
+
+    Returns True if the caller should stop, False to keep working.
+    When the limit is hit, exactly one thread sleeps until the 07:00 WIB
+    reset; the other threads wait for that reset instead of exiting —
+    the old _shutdown flag made every other thread break out of its
+    loop permanently, so only the sleeping thread survived the reset.
+    The sleep is interruptible: a stop request during the wait returns
+    True immediately instead of being cleared away afterwards.
+    """
+    if can_post():
+        return False
+
+    with _reset_lock:
+        owner = not _reset_in_progress.is_set()
+        if owner:
+            _reset_in_progress.set()
+
+    if not owner:
+        # Another thread is already sleeping until reset; wait for it.
+        # Short wait timeout: clearing the event does not wake waiters,
+        # so poll frequently instead of sleeping through the reset.
+        while _reset_in_progress.is_set():
+            if stop_flag.is_set():
+                return True
+            _reset_in_progress.wait(timeout=1)
+        return False
+
+    # This thread owns the reset sleep.
+    seconds_until_reset = get_seconds_until_reset()
+    hours = seconds_until_reset // 3600
+    minutes = (seconds_until_reset % 3600) // 60
+
+    print(f"\n  🛑 DAILY LIMIT REACHED: {get_today_posts()}/{DAILY_POST_LIMIT}")
+    print(f"  📅 Reset in {hours}h {minutes}m (7 AM WIB)")
+    print(f"  💤 Sleeping {hours}h {minutes}m until reset...\n")
+
+    audit_logger.info(f"DAILY_LIMIT|{get_today_posts()}|sleep_{hours}h{minutes}m")
+
+    stopped = stop_flag.wait(timeout=seconds_until_reset)
+    if stopped:
+        _reset_in_progress.clear()
+        return True
+
+    from storage.post_counter import reset_counter
+    reset_counter()
+
+    _reset_in_progress.clear()
+    print("  🌅 New day! Resuming pipeline...\n")
+    audit_logger.info("DAILY_RESET|resumed")
+    return False
 
 
 def refresh_news_cache():
@@ -309,12 +338,12 @@ def run_orchestrator():
     
     print(f"\n{'='*50}")
     print("🚀 Starting Pipeline Orchestrator")
-    print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"📅 {datetime.now(WIB).strftime('%Y-%m-%d %H:%M:%S')} WIB")
     print(f"📊 Daily limit: {DAILY_POST_LIMIT} posts/day")
     print(f"📰 News refresh interval: {NEWS_REFRESH_INTERVAL}s")
     print(f"{'='*50}\n")
     
-    audit_logger.info(f"PIPELINE_START|{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    audit_logger.info(f"PIPELINE_START|{datetime.now(WIB).strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Auto-clean queues
     print("  🧹 Auto-cleaning queues...")
@@ -329,10 +358,6 @@ def run_orchestrator():
     _last_news_refresh = 0
     _news_cache = []
     refresh_news_cache()
-    
-    # Reset shutdown flag
-    global _shutdown
-    _shutdown = False
     
     # Start workers
     threading.Thread(target=collector_worker, daemon=True).start()

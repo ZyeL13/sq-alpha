@@ -2,15 +2,15 @@
 import json
 import os
 from datetime import datetime, timedelta
-from config import POST_COUNTER_FILE, DAILY_POST_LIMIT
+from config import POST_COUNTER_FILE, DAILY_POST_LIMIT, WIB
 
 # Reset hour in WIB (GMT+7)
 RESET_HOUR = 7  # jam 7 pagi
 
 def _get_reset_time() -> datetime:
-    """Get today's reset time (7 AM WIB)"""
-    now = datetime.now()
-    reset = datetime(now.year, now.month, now.day, RESET_HOUR, 0, 0)
+    """Get today's reset time (7 AM WIB, timezone-aware)."""
+    now = datetime.now(WIB)
+    reset = datetime(now.year, now.month, now.day, RESET_HOUR, 0, 0, tzinfo=WIB)
     if now >= reset:
         return reset
     else:
@@ -40,7 +40,7 @@ def increment_post_counter():
     data = {
         "reset_key": today_key,
         "square_count": current + 1,
-        "last_updated": datetime.now().isoformat()
+        "last_updated": datetime.now(WIB).isoformat()
     }
     
     os.makedirs(os.path.dirname(POST_COUNTER_FILE), exist_ok=True)
@@ -52,9 +52,8 @@ def can_post() -> bool:
 
 def get_seconds_until_reset() -> int:
     """Seconds until next reset (7 AM WIB)"""
-    from datetime import datetime, timedelta
-    now = datetime.now()
-    reset = datetime(now.year, now.month, now.day, 7, 0, 0)  # 7 AM
+    now = datetime.now(WIB)
+    reset = datetime(now.year, now.month, now.day, RESET_HOUR, 0, 0, tzinfo=WIB)
     if now >= reset:
         reset += timedelta(days=1)
     return int((reset - now).total_seconds())
@@ -65,7 +64,7 @@ def reset_counter():
     data = {
         "reset_key": today_key,
         "square_count": 0,
-        "last_updated": datetime.now().isoformat()
+        "last_updated": datetime.now(WIB).isoformat()
     }
     os.makedirs(os.path.dirname(POST_COUNTER_FILE), exist_ok=True)
     with open(POST_COUNTER_FILE, 'w') as f:
