@@ -17,7 +17,6 @@ BINANCE_SQUARE_KEY = os.getenv("BINANCE_SQUARE_KEY")
 BINANCE_SQUARE_URL = os.getenv("BINANCE_SQUARE_URL")
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY")
 CMC_API_KEY        = os.getenv("CMC_API_KEY")
-BITQUERY_API_KEY   = os.getenv("BITQUERY_API_KEY")
 DEEPSEEK_API_KEY   = os.getenv("DEEPSEEK_API_KEY")
 NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY")
 
@@ -155,12 +154,14 @@ MIN_TOTAL_SCORE = 0.35
 MIN_PRIMARY_SCORE = 0.60
 
 # ========== COOLDOWN CONFIG ==========
+# Single source of truth — processors/dedupe.py imports these.
+# Values are the ones dedupe.py actually ran with (its own copies
+# differed: 3h/5h/8h/12h here vs 4h/8h/24h there).
 # Market cap tiers (in USD)
 MARKET_CAP_TIERS = [
-    (10_000_000_000, 3 * 3600),   # 3 jam
-    (1_000_000_000, 5 * 3600),    # 5 jam
-    (100_000_000, 8 * 3600),      # 8 jam
-    (0, 12 * 3600),               # 12 jam
+    (10_000_000_000, 4 * 3600),   # > $10B → 4 jam
+    (1_000_000_000, 8 * 3600),    # > $1B → 8 jam
+    (0, 24 * 3600),               # default → 24 jam
 ]
 
 # Specific token overrides

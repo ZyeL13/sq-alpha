@@ -5,31 +5,14 @@ import os
 import logging
 import hashlib
 from typing import Dict, List, Tuple
-from config import DEDUP_FILE
+from config import (
+    DEDUP_FILE,
+    DAILY_POST_TARGET,
+    MARKET_CAP_TIERS,
+    TOKEN_COOLDOWN_OVERRIDES,
+)
 
 log = logging.getLogger(__name__)
-
-# ========== COOLDOWN CONFIG ==========
-# Market cap tiers (in USD)
-MARKET_CAP_TIERS = [
-    (10_000_000_000, 4 * 3600),   # > $10B → 4 jam
-    (1_000_000_000, 8 * 3600),    # > $1B → 8 jam
-    (0, 24 * 3600),                # default → 24 jam
-]
-
-# Specific token overrides
-TOKEN_COOLDOWN_OVERRIDES = {
-    "BTC": 4 * 3600,
-    "ETH": 4 * 3600,
-    "SOL": 6 * 3600,
-    "BNB": 6 * 3600,
-    "XRP": 8 * 3600,
-    "DOGE": 8 * 3600,
-}
-
-# Similarity threshold
-SIMILARITY_THRESHOLD = 0.65
-DAILY_POST_TARGET = 70  # target post per hari (bukan limit hard)
 
 
 def get_cooldown_seconds(symbol: str, market_cap: float = 0) -> int:

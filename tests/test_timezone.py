@@ -7,7 +7,7 @@ import os
 import sqlite3
 import sys
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
