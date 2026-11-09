@@ -2,6 +2,7 @@
 import re
 from collections import defaultdict
 from storage.post_history import get_recent_posts
+from prompts.styles import EDITORIAL_FORBIDDEN
 
 # Patterns that indicate reasoning/planning (HARUS ditolak)
 REJECT_PATTERNS = [
@@ -62,6 +63,22 @@ def is_reasoning_leak(content: str) -> bool:
         return False
 
     return True
+
+
+def has_editorial_violation(content: str) -> str | None:
+    """Editorial v2 check: reject template habits and hype phrases.
+
+    Returns the offending phrase, or None when the content is clean.
+    This is what the week-one KPI "0 editorial violations" counts:
+    a post that trips this never reaches the queue.
+    """
+    if not content:
+        return None
+    lowered = content.lower()
+    for phrase in EDITORIAL_FORBIDDEN:
+        if phrase in lowered:
+            return phrase
+    return None
 
 
 def has_double_symbol(content: str, symbol: str) -> bool:
@@ -169,14 +186,11 @@ def proofread_post(content: str, symbol: str) -> str:
     if f"${symbol_upper}" not in content.upper():
         content = f"${symbol_upper} " + content
 
-    # 9. Tambahkan CTA di akhir jika tidak ada — tanpa ticker.
-    # Cashtag sudah muncul sekali di baris pertama; mengulanginya di
-    # CTA ("tracking $X.") adalah salah satu sumber overuse.
+    # 9. No forced sign-off. Editorial v2 forbids template closers
+    # ("watching from here", "monitoring the session", "tracking the
+    # move"): a post ends where its observation ends. The old code
+    # appended "tracking the move." here — removed.
     content = content.strip()
-    cta_pattern = r'tracking|watching|monitoring'
-    if not re.search(cta_pattern, content, re.IGNORECASE):
-        content += "\n\ntracking the move."
-    
     # 10. Perbaiki spasi ganda
     content = re.sub(r' {2,}', ' ', content)
     
@@ -204,6 +218,10 @@ def validate_post(content: str, symbol: str = None) -> tuple[bool, str]:
     
     if is_reasoning_leak(content):
         return False, "Reasoning leak detected"
+
+    violation = has_editorial_violation(content)
+    if violation:
+        return False, f"Editorial violation: {violation}"
 
     if len(content) < 100:
         return False, "Content too short"

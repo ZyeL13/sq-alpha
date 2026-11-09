@@ -303,3 +303,223 @@ def add_to_recent(post: str) -> None:
     recent_posts.append(post)
     if len(recent_posts) > 10:
         recent_posts.pop(0)
+
+
+# ========== EDITORIAL v2 — VOICE CALIBRATION ==========
+# Few-shot calibration for SQ-Alpha, The Skeptical Market Observer.
+# Learn the VOICE below, not the sentence structure: the examples
+# illustrate tone, stance and restraint. Do not copy their paragraph
+# shape, length, or phrasing from post to post — a model that
+# memorizes the examples produces the same template problem this
+# calibration exists to prevent.
+# =========================================================
+
+VOICE_CALIBRATION = """
+VOICE CALIBRATION — learn the voice, not the sentence structure.
+The examples below show tone, stance and restraint. Vary paragraph
+shape and length every time; never reproduce an example's structure.
+
+POSITIVE EXAMPLES
+
+1. Analytical Take
+$SOL is recovering, but the volume tells a less convincing story. Buyers are showing up, just not aggressively enough to call this a trend reversal. Price improvement is welcome. Confirmation would be better.
+
+2. Contrarian View
+Everyone seems focused on the breakout, but the more interesting question is whether buyers can sustain it. A breakout without follow-through is just an expensive way to create excitement.
+
+3. Dry Humor
+$BTC moved 2% and crypto Twitter suddenly discovered macroeconomics again. The move is real. The explanations arriving five minutes later deserve a little more skepticism.
+
+4. Data Observation
+$XYZ traded $180M in the last 24 hours — roughly 3x its recent average — while price moved less than 1%. Volume at this level with price going nowhere is the anomaly, not the price itself. Either buyers are absorbing supply, or sellers are distributing into strength. The tape will say which, probably within a session or two.
+
+NEGATIVE EXAMPLES
+
+1. Forced Contrarianism
+BAD: "Actually, everyone is wrong about $BTC. The market is completely misunderstanding what's happening."
+WHY: Disagrees without evidence. Creates artificial controversy.
+
+2. Fake Intellectualism
+BAD: "Most traders simply don't understand the deeper mechanics behind this market structure."
+WHY: Condescending, vague and unsupported.
+
+3. Forced Sarcasm
+BAD: "Another genius breakout prediction from crypto experts. Surely nothing can go wrong."
+WHY: Sarcasm replaces analysis instead of supporting it.
+
+4. Manufactured Conviction
+BAD: "$SOL is obviously going lower. Anyone expecting a recovery is ignoring reality."
+WHY: Overstates certainty and dismisses alternative interpretations.
+
+CALIBRATION RULES
+- Skepticism does not require disagreement.
+- Contrarian opinions must identify specific evidence.
+- Humor must be occasional, relevant and secondary to analysis.
+- Never manufacture controversy to attract engagement.
+- Never imply superior intelligence over the audience.
+- If market evidence supports the consensus, acknowledge it.
+- Neutrality is acceptable when evidence is inconclusive.
+- Prefer an honest observation over an impressive-sounding conclusion.
+"""
+
+# Phrases the editorial quality gate rejects. These are the template
+# habits Editorial v2 exists to kill, plus the hype phrases the
+# system prompt already forbids. Matched case-insensitively.
+EDITORIAL_FORBIDDEN = [
+    "watching from here",
+    "monitoring the session",
+    "market participants are closely watching",
+    "only time will tell",
+    "tracking the move",
+    "under the surface",
+    "whispers",
+    "hidden accumulation",
+    "nobody is noticing",
+    "smart money",
+    "the tape says",
+    "market sleeping",
+    "secret signal",
+    "quiet before the move",
+    "surgical rotation",
+    "shadow accumulation",
+    "silent wallets",
+    "insiders loading",
+]
+
+# Per-style guidance injected into the prompt. Short on purpose: the
+# style name plus its job. The voice itself comes from VOICE_CALIBRATION.
+STYLE_GUIDANCE = {
+    "analytical": (
+        "ANALYTICAL TAKE (default). State what happened, why it matters, "
+        "and what evidence would change the read. Calm, direct, no forced edge."
+    ),
+    "contrarian": (
+        "CONTRARIAN VIEW. The tape contradicts the prevailing story. Name "
+        "the story, show the specific evidence against it, and say what "
+        "would prove the story right after all."
+    ),
+    "data_observation": (
+        "DATA OBSERVATION. Let the numbers lead. One anomaly, stated plainly, "
+        "with the comparison that makes it anomalous. No narrative dressing."
+    ),
+    "dry_humor": (
+        "DRY HUMOR. One dry, observational line about an absurd market "
+        "moment, then the analysis. Humor is secondary — never the whole post."
+    ),
+}
+
+
+def _chg_since_news(token) -> "float | None":
+    """Price change (%) between the news snapshot and now.
+
+    Returns None when there is no catalyst or no usable snapshot, so
+    callers never treat a missing snapshot as a 0% move.
+    """
+    if not token.get("news_catalyst"):
+        return None
+    price_then = token.get("price_at_news", 0) or 0
+    price_now = token.get("price", 0) or 0
+    if not price_then or not price_now:
+        return None
+    return (price_now - price_then) / price_then * 100
+
+
+def _vol_chg_since_news(token) -> "float | None":
+    """Volume change (%) between the news snapshot and now, or None."""
+    if not token.get("news_catalyst"):
+        return None
+    vol_then = token.get("volume_at_news", 0) or 0
+    vol_now = token.get("volume_24h", 0) or 0
+    if not vol_then or not vol_now:
+        return None
+    return (vol_now - vol_then) / vol_then * 100
+
+
+def _anomaly(token, scores=None) -> float:
+    """Anomaly signal in 0..1. Prefers the pipeline's own anomaly score
+    when the caller passes scores; otherwise mirrors the same thresholds
+    from the raw fields (see processors/score.py anomaly_score)."""
+    if scores:
+        value = scores.get("anomaly")
+        if value is not None:
+            return float(value)
+    vol = token.get("volume_24h", 0) or 0
+    chg = abs(token.get("price_change_percent", 0) or 0)
+    if vol > 100_000_000 and chg < 1.0:
+        return 0.9
+    if vol > 50_000_000 and chg < 2.0:
+        return 0.7
+    if vol > 10_000_000 and chg < 3.0:
+        return 0.5
+    if vol < 1_000_000 and chg > 10:
+        return 0.8
+    return 0.2
+
+
+def select_editorial_style(token, scores=None) -> str:
+    """Pick the editorial style from the token's own data — never a draw.
+
+    Deterministic priority, first match wins:
+    1. data_observation — a real anomaly: anomaly score >= 0.7, or
+       volume moved >= 50% since the news landed.
+    2. contrarian — the tape since the catalyst contradicts the day's
+       story: price moved >= 3% one way since the news while the 24h
+       change is >= 3% the other way.
+    3. dry_humor — a phenomenon worth satirizing: a >= 15% move with no
+       catalyst at all, or a >= 10% move that ended mid-range (a big
+       session that went nowhere).
+    4. analytical — the default when nothing above applies.
+
+    Randomisation is only for delivery variation, never for this choice.
+    """
+    chg = token.get("price_change_percent", 0) or 0
+    has_news = bool(token.get("news_catalyst"))
+    range_pos = token.get("range_position", 0.5)
+
+    vol_chg_news = _vol_chg_since_news(token)
+    if _anomaly(token, scores) >= 0.7:
+        return "data_observation"
+    if vol_chg_news is not None and abs(vol_chg_news) >= 50:
+        return "data_observation"
+
+    chg_news = _chg_since_news(token)
+    if chg_news is not None and abs(chg_news) >= 3 and abs(chg) >= 3:
+        if (chg_news > 0) != (chg > 0):
+            return "contrarian"
+
+    if not has_news and abs(chg) >= 15:
+        return "dry_humor"
+    if abs(chg) >= 10 and 0.3 <= range_pos <= 0.7:
+        return "dry_humor"
+
+    return "analytical"
+
+
+def insufficient_insight(token, scores=None) -> "str | None":
+    """Quality-over-quota pre-check, run before any LLM call.
+
+    Returns a short skip reason, or None when the token is worth a post.
+    The bar is deliberately low: a real move, a catalyst, or a notable
+    volume story is enough. Only genuinely empty tapes are skipped —
+    never skip just because the move is small or the market is boring;
+    a short honest post beats no post, and a boring market is itself
+    an observation for the analytical style.
+    """
+    price = token.get("price", 0) or 0
+    vol = token.get("volume_24h", 0) or 0
+    if price <= 0 or vol <= 0:
+        return "no_valid_data"
+
+    chg = abs(token.get("price_change_percent", 0) or 0)
+    range_pos = token.get("range_position", 0.5)
+    has_news = bool(token.get("news_catalyst"))
+    if (
+        not has_news
+        and chg < 1.0
+        and 0.3 <= range_pos <= 0.7
+        and _anomaly(token, scores) < 0.5
+        and vol < 10_000_000
+    ):
+        return "no_observation"
+
+    return None

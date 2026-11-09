@@ -2,7 +2,13 @@
 from typing import Dict, Any, Optional
 from llm import generate
 from prompts.rebate import REBATE_SYSTEM
-from prompts.styles import get_hook, get_angle, generate_data_anchor, get_closer
+from prompts.styles import (
+    STYLE_GUIDANCE,
+    VOICE_CALIBRATION,
+    generate_data_anchor,
+    insufficient_insight,
+    select_editorial_style,
+)
 from generators.quality_gate import validate_post, is_similar_to_recent, clean_redundant_symbol_references, proofread_post
 from storage.post_history import record_post as add_to_recent
 import logging_config
@@ -55,7 +61,16 @@ def news_price_context(token: Dict[str, Any]) -> str:
     return "news price context: " + "; ".join(parts)
 
 
-def build_prompt(token: Dict[str, Any], category: str) -> str:
+def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] | None = None) -> str:
+    """Build the user prompt for one post.
+
+    Editorial v2: the style is selected from the token's own data
+    (see prompts.styles.select_editorial_style) and the prompt carries
+    the style guidance plus the voice calibration. Nothing is forced
+    verbatim — no hook first line, no angle paragraph, no closing line.
+    The old build_prompt forced all three, which is exactly the
+    identical-structure template Editorial v2 removes.
+    """
     symbol = token["symbol"]
     price = token.get("price", 0)
     chg = token.get("price_change_percent", 0)
@@ -82,14 +97,7 @@ def build_prompt(token: Dict[str, Any], category: str) -> str:
     if price_context_line:
         data_section += price_context_line
 
-    hook = get_hook(category)
-    angle = get_angle()
-    closer = get_closer()
-
-    closing_line = closer
-
-    # Generate data anchor for factual reference
-    data_anchor = generate_data_anchor(symbol, price, chg, volume_raw)
+    style = select_editorial_style(token, scores)
 
     prompt = f"""You are writing a short market observation post for Binance Square.
 
@@ -98,55 +106,47 @@ GOAL: Make the reader curious enough to check ${symbol}'s chart.
 DATA:
 {data_section}
 
-FORMAT:
-- Write 4-6 short paragraphs.
-- Separate EVERY paragraph with ONE blank line.
-- Never write large text blocks.
-- Some paragraphs may contain only one sentence.
-- The post should feel readable for around 1-2 minutes.
-- Start directly with the HOOK below.
-- End with the CLOSING line below, verbatim.
+EDITORIAL STYLE: {style}
+{STYLE_GUIDANCE[style]}
 
-HOOK - copy this as your FIRST LINE, word for word:
-{hook}
-
-ANGLE - use this as the basis for your second paragraph, reworded with the data above:
-{angle}
-
-CLOSING - Your final line must be exactly this, nothing after it:
-{closing_line}
+{VOICE_CALIBRATION}
 
 RULES:
 - Lowercase everything except ${symbol} and other $TOKENS
-- Use hedged language: may, appears, looks, seems
-- Observable facts only. No predictions, no opinions.
+- Use only the DATA above. Never invent numbers, technical levels,
+  catalysts, or market sentiment.
+- An interpretation is a view with reasons, not a trade instruction:
+  never tell readers to buy, sell, hold, enter, or exit, and never
+  present the post as financial advice.
+- Observable facts first, interpretation second.
+- Explain why the behavior may matter.
+- Compare the move to normal market behavior when relevant.
+- Short by default (40-120 words). Longer only when the observation
+  needs the room; never pad to fill space.
+- Separate paragraphs with ONE blank line. Never write large text blocks.
+- Paragraph count and lengths must vary; do not fall into a fixed shape.
+- End where the observation ends. No forced closing line, no forced
+  question, no "watching from here" style sign-off.
 - Do not mention related tokens unless directly relevant to the data.
 - $SYMBOL and all token tickers MUST be uppercase: $XRP not $xrp, $BTC not $btc
 - Volume format: use capital M, $106.0M not $106.0m
-- Expand naturally from the provided data.
-- Explain why the behavior may matter.
-- Compare the move to normal market behavior when relevant.
-- Mild interpretation is allowed.
-- The post should feel like a trader thinking through the market in public.
-- Avoid dramatic or mysterious language.
-- Avoid sounding like a template or summary bot.
-- Insert a blank line between every paragraph.
-- Keep visual rhythm clean and easy to scan.
-- Avoid dense walls of text.
 - Refer to the token as ${symbol} (with $ prefix, uppercase) exactly ONCE, in the first line. In every later sentence use "the token" — never repeat the cashtag.
-- Never repeat the hook line anywhere else in the post.
-- End with exactly ONE closing line. Do not add any sentence after the closing line.
-
-FORBIDDEN PHRASES:
-- "i'm curious", "it will be interesting", "in the coming days", "it looks like"
-- "one might expect", "it's worth noting", "as one might"
-- "i", "we", "you" (no first or second person)
+- No first or second person: no "i", "we", "you".
 
 Write the post inside <post> tags. Nothing outside the tags."""
     return prompt
 
 def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]) -> Optional[str]:
-    prompt = build_prompt(token, category)
+    # Quality over quota: skip before any LLM call when there is
+    # genuinely nothing to observe. The reason is audit-logged so the
+    # skip rate can be evaluated (Editorial v2 KPI).
+    skip_reason = insufficient_insight(token, scores)
+    if skip_reason:
+        print(f"  ⏭️ Skipping ${token['symbol']}: {skip_reason}")
+        audit_logger.info(f"SKIPPED|{token['symbol']}|{category}|{skip_reason}")
+        return None
+
+    prompt = build_prompt(token, category, scores)
     content = generate(prompt, system_prompt=REBATE_SYSTEM, category=category)
     
     if not content or not isinstance(content, str):
