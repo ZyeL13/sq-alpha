@@ -304,6 +304,66 @@ def test_validate_accepts_real_demo_posts():
         assert valid, reason
 
 
+def test_validate_rejects_demo2_orbit_leak():
+    """Demo run 2 (2026-11-09 14:46 WIB): the ORBIT output PASSED the
+    old gate. Its tells sit past the old 400-char scan window
+    ("Let's draft:" at char 711, "Word count check:" at char 1077),
+    and it opens with the "tags" fragment left by the <post> extraction.
+    """
+    from generators.quality_gate import is_reasoning_leak, validate_post
+
+    orbit_demo2 = (
+        "tags\n\n"
+        "Data observation style: Let numbers lead. One anomaly stated "
+        "plainly with comparison.\n\n"
+        "The anomaly: +0.4% price move on $150.0M volume. That's high "
+        "volume for a tiny price move. Need to compare to normal market "
+        "behavior, but I don't have \"recent average\" volume in the data. "
+        "I can only use the data above. Wait, the rules say \"Use only the "
+        "DATA above. Never invent numbers...\" So I cannot say \"3x its "
+        "recent average\" because I don't know the recent average. I can "
+        "only state what is observable: $150.0M volume with only +0.4% "
+        "move.\n\n"
+        "I can say something like: volume is high relative to the price "
+        "movement. That's a comparison inherent in the data itself "
+        "(volume vs price change), not an invented number.\n\n"
+        "Let's draft:\n\n"
+        "$ORBIT traded $150.0M in volume while price moved only 0.4% to "
+        "$0.8500. That is a large amount of activity for a near-flat "
+        "session. Volume this elevated usually accompanies a clearer "
+        "directional move, so the mismatch between activity and price "
+        "change is worth noting. Either side is absorbing the other, or "
+        "the market is waiting for a clearer signal.\n\n"
+        "Word count check:\n1. $ORBIT\n2. traded\n3. $150.0M"
+    )
+    assert is_reasoning_leak(orbit_demo2)
+    valid, reason = validate_post(orbit_demo2)
+    assert not valid
+    assert reason == "Reasoning leak detected", reason
+
+
+def test_validate_accepts_demo2_nova_post():
+    """Demo run 2 NOVA post (via Groq) must still pass — it is a real
+    post, and it contains '9.1% from the news moment', a comparison
+    computed from the demo's own numbers."""
+    from generators.quality_gate import validate_post
+
+    nova2 = (
+        "$NOVA launched mainnet, and the headline is \"price will surge on "
+        "activation.\" the token opened the session at $100, now trades "
+        "around $95.50, a 4.5% dip, while 24h volume rose to $12.0M, up "
+        "9.1% from the news moment. the higher volume suggests "
+        "participants are still active, yet the price move contradicts the "
+        "bullish narrative. if buyers were truly convinced, the price "
+        "would likely have held above $100 or at least shown a clear "
+        "upward bias alongside the volume. a sustained recovery above the "
+        "$100 mark, accompanied by continued volume growth, would be the "
+        "simplest way to validate the mainnet optimism."
+    )
+    valid, reason = validate_post(nova2)
+    assert valid, reason
+
+
 # --- calibration content ---
 
 def test_calibration_covers_all_four_styles():

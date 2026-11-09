@@ -118,3 +118,30 @@ Style selection 4/4 correct, FLAT skipped before any LLM call. NOVA
    echoed output rules, bullet lists) plus a guard so the blanket
    lowercase-first-word pass no longer admits "We"/"I"/"Let's".
    Regression tests use the verbatim demo outputs.
+
+## Fix 2 after the second VPS demo (2026-11-09, 14:46 WIB)
+
+Demo 2 showed the gate fix worked for KITE and MEME (both REJECTED)
+but ORBIT still PASSED while being reasoning leak. Root cause: the
+gate only scanned the first 400 chars; ORBIT's tells sat later
+("Let's draft:" at char 711, "Word count check:" at char 1077), and
+its first word "tags" (a fragment left by the <post> extraction)
+passed the blanket lowercase-first-word rule. Fix: scan the WHOLE
+content for the leak patterns (posts are short; these markers never
+occur in a legit post anywhere), plus new patterns for numbered
+lists, echoed style guidance ("Data observation style: ...") and
+meta-commentary ("the rules say"), and "tags"/"tag" in the
+first-word guard. Regression test uses the verbatim demo-2 ORBIT
+text; demo-2 NOVA (Groq) added as a passing control. The demo script
+now also labels rejected content "[REJECTED — would NOT be posted]"
+and prints a per-case SUMMARY, so rejected drafts can't be mistaken
+for posts. Note: a gate rejection means that slot is skipped, not
+retried — quality over quota by design.
+
+Separate VPS issue in demo 2: blockrun still tried
+nvidia/deepseek-v4-flash (HTTP 400, disabled immediately — the new
+400 handling worked). The snapshot config carries free/* IDs
+(verified on the remote branch), so the VPS config.py still holds
+zyel's nvidia/* edit — it survived the pull somehow. Diagnose on the
+VPS with `git status --short`, `git diff config.py` and
+`grep '"model"' config.py` before the next pull.

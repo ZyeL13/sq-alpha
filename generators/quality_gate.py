@@ -30,9 +30,16 @@ REJECT_PATTERNS = [
     r"(?i)(let'?s (draft|count|try|start|write|plan))",
     r"(?i)(first line:|paragraph \d|word count|let'?s count)",
     r"(?i)no (explanations|analysis notes|reasoning|drafts)",
-    # A bullet list in the first 400 chars is planning notes, never a
-    # post (posts are 1-2 prose paragraphs, no lists).
+    # A bullet list is planning notes, never a post (posts are 1-2
+    # prose paragraphs, no lists).
     r"(?m)^\s*[-•]\s",
+    # A numbered list ("Word count check:\n1. $ORBIT\n2. traded...") is
+    # planning notes, never a post — demo 2, 2026-11-09.
+    r"(?m)^\s*\d+[.)]\s",
+    # Echoed style guidance ("Data observation style: Let numbers
+    # lead...") and meta-commentary about the rules themselves.
+    r"(?i)(analytical|contrarian|data observation|dry humor)\s+style\s*:",
+    r"(?i)(the rules say|i can say something like)",
 ]
 
 # For tracking reject reasons
@@ -45,9 +52,13 @@ def is_reasoning_leak(content: str) -> bool:
         return True
 
     content_lower = content.lower().strip()
-    first_part = content_lower[:400]
+    # Scan the WHOLE content, not just the first 400 chars. Demo 2
+    # (2026-11-09) proved the window too narrow: the ORBIT leak looked
+    # clean for 400 chars while "Let's draft:" sat at char 711 and
+    # "Word count check:" at char 1077. Posts are short (40-120 words)
+    # and these markers never occur in a legit post anywhere.
     for pattern in REJECT_PATTERNS:
-        if re.search(pattern, first_part):
+        if re.search(pattern, content_lower):
             return True
 
     if content_lower.startswith('$'):
@@ -74,8 +85,10 @@ def is_reasoning_leak(content: str) -> bool:
 
     # Reasoning often opens with a first-person/planning word that the
     # blanket lowercase pass below would otherwise let through
-    # ("We need to produce a short post..." — demo 2026-11-09).
-    if first_word in ("we", "i", "let", "lets", "let's"):
+    # ("We need to produce a short post..." — demo 2026-11-09), or with
+    # a fragment of the echoed output rules ("tags" — the tail of
+    # "<post> tags", demo 2 ORBIT).
+    if first_word in ("we", "i", "let", "lets", "let's", "tags", "tag"):
         return True
 
     if len(first_word) <= 10 and re.match(r'^[a-z]+$', first_word):

@@ -54,6 +54,7 @@ CASES = [
 
 def main() -> None:
     prompts_only = "--prompts-only" in sys.argv
+    verdicts = []
     for expected, category, token in CASES:
         scored = score_token(token, category)
         style = select_editorial_style(token, scored["scores"])
@@ -63,12 +64,14 @@ def main() -> None:
               f"selected={style} skip={skip}")
         if skip:
             print(f"  -> skipped before any LLM call ({skip})")
+            verdicts.append((token["symbol"], "SKIPPED"))
             continue
         assert style == expected, f"{token['symbol']}: {style} != {expected}"
         prompt = build_prompt(token, category, scored["scores"])
         if prompts_only:
             print(prompt[:1200])
             print("  [... prompt truncated ...]")
+            verdicts.append((token["symbol"], "PROMPTS ONLY"))
             continue
         content = generate(
             prompt, system_prompt=REBATE_SYSTEM, category=category,
@@ -76,12 +79,26 @@ def main() -> None:
         )
         if not content:
             print("  -> LLM returned nothing")
+            verdicts.append((token["symbol"], "NO CONTENT"))
             continue
         valid, result = validate_post(content)
-        print(f"  quality gate: {'PASS' if valid else 'REJECT: ' + str(result)}")
+        if valid:
+            verdicts.append((token["symbol"], "PASS — would be posted"))
+            print("  quality gate: PASS")
+            print("-" * 60)
+            print(result)
+        else:
+            verdicts.append((token["symbol"], f"REJECT: {result}"))
+            print(f"  quality gate: REJECT: {result}")
+            print("-" * 60)
+            print("  [REJECTED — would NOT be posted. "
+                  "Shown only to inspect why:]")
+            print(content)
         print("-" * 60)
-        print(result if valid else content)
-        print("-" * 60)
+    print(f"\n{'=' * 60}")
+    print("SUMMARY (only PASS would be posted):")
+    for symbol, verdict in verdicts:
+        print(f"  {symbol}: {verdict}")
 
 
 if __name__ == "__main__":
