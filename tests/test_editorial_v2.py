@@ -244,6 +244,66 @@ def test_generate_post_skips_without_calling_llm(monkeypatch):
     assert pg.generate_post(flat, "HOT", {}) is None
 
 
+# --- quality gate: reasoning leaks from the VPS demo 2026-11-09 ---
+
+def test_validate_rejects_reasoning_leaks_from_demo():
+    """Verbatim BlockRun mistral outputs from the 2026-11-09 demo run.
+
+    Both were returned as the "post" and PASSED the old gate.
+    """
+    from generators.quality_gate import is_reasoning_leak, validate_post
+
+    kite_reasoning = (
+        'We need to produce a short post (40-120 words). Must start with '
+        '"$KITE" uppercase in first line. Then rest sentences refer to '
+        '"the token". Must be analytical, calm, skeptical, maybe witty but '
+        "not forced. Let's count approximate. First line: \"$KITE\" (1 word?). "
+        "Let's draft: the token rose 4.2% to $2.40 on $8.5M volume."
+    )
+    orbit_reasoning = (
+        "tags\n- No explanations, no analysis notes, no reasoning, no drafts\n\n"
+        "Data: $ORBIT +0.4% on $150.0M volume, price $0.8500.\n\n"
+        "I need to find an anomaly. The data shows +0.4% price move with "
+        "$150.0M volume. Without knowing average volume, I can't say it's "
+        "3x average. Let's draft: $ORBIT traded $150.0M in volume while "
+        "price moved just +0.4% to $0.8500."
+    )
+    for leak in (kite_reasoning, orbit_reasoning):
+        assert is_reasoning_leak(leak), leak[:60]
+        valid, reason = validate_post(leak)
+        assert not valid, leak[:60]
+        assert reason == "Reasoning leak detected", reason
+
+
+def test_validate_accepts_real_demo_posts():
+    """The two good posts from the same demo run must still pass."""
+    from generators.quality_gate import validate_post
+
+    nova = (
+        "$NOVA jumped 6% on $12.0M volume, yet the price sits at $95.50, "
+        "down about 4.5% from the $100 level seen when the mainnet was "
+        "announced. the prevailing story is that the launch should have "
+        "sparked a rally, but the token is actually slipping while volume "
+        "modestly climbs. this mismatch suggests sellers are still in "
+        "control, and the extra volume may simply be distribution rather "
+        "than fresh buying. a sustained price rise above $100 accompanied "
+        "by continued volume growth would be needed to validate the "
+        "bullish narrative."
+    )
+    meme = (
+        "$MEME is up 21% at $0.0121 with $6.0M in volume, which is roughly "
+        "the market equivalent of a small crowd cheering in an empty room. "
+        "the move is real, but the participation is modest relative to the "
+        "size of the gain. price can stretch quickly when liquidity is "
+        "thin, so a single session of buying does not necessarily signal "
+        "sustained demand. volume staying elevated would make the move "
+        "harder to dismiss."
+    )
+    for good in (nova, meme):
+        valid, reason = validate_post(good)
+        assert valid, reason
+
+
 # --- calibration content ---
 
 def test_calibration_covers_all_four_styles():

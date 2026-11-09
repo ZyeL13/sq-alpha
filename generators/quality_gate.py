@@ -20,6 +20,19 @@ REJECT_PATTERNS = [
     r"(?i)^hmm",
     r"(?i)let me check",
     r"(?i)hold on",
+    # Demo 2026-11-09 (BlockRun mistral): chain-of-thought returned as
+    # the "post" and passed the old gate. These cover its exact shapes:
+    # "We need to produce a short post...", "I need to find an anomaly...",
+    # "Let's draft:", "First line: ...", "Let's count approximate...",
+    # and the echoed output rules ("No explanations, no reasoning...").
+    r"(?i)(we need to (produce|write|create|craft|draft|make|do))",
+    r"(?i)(i need to (find|figure out|check|identify|look|see))",
+    r"(?i)(let'?s (draft|count|try|start|write|plan))",
+    r"(?i)(first line:|paragraph \d|word count|let'?s count)",
+    r"(?i)no (explanations|analysis notes|reasoning|drafts)",
+    # A bullet list in the first 400 chars is planning notes, never a
+    # post (posts are 1-2 prose paragraphs, no lists).
+    r"(?m)^\s*[-•]\s",
 ]
 
 # For tracking reject reasons
@@ -58,6 +71,12 @@ def is_reasoning_leak(content: str) -> bool:
     first_word = content_lower.split()[0] if content_lower.split() else ''
     if first_word in valid_starts:
         return False
+
+    # Reasoning often opens with a first-person/planning word that the
+    # blanket lowercase pass below would otherwise let through
+    # ("We need to produce a short post..." — demo 2026-11-09).
+    if first_word in ("we", "i", "let", "lets", "let's"):
+        return True
 
     if len(first_word) <= 10 and re.match(r'^[a-z]+$', first_word):
         return False

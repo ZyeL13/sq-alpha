@@ -154,7 +154,7 @@ def test_groq_payload_has_reasoning_params(monkeypatch):
 
     def fake_post(url, headers=None, json=None, timeout=None):
         seen["json"] = json
-        return _fake_response("$BTC test post content here, long enough ok")
+        return _fake_response("<post>$BTC test post content here, long enough ok</post>")
 
     monkeypatch.setattr(llm.requests, "post", fake_post)
     content, error = llm._call_provider("groq", "prompt", "system", 1, 0)
@@ -172,13 +172,83 @@ def test_blockrun_payload_has_no_reasoning_params(monkeypatch):
 
     def fake_post(url, headers=None, json=None, timeout=None):
         seen["json"] = json
-        return _fake_response("$BTC test post content here, long enough ok")
+        return _fake_response("<post>$BTC test post content here, long enough ok</post>")
 
     monkeypatch.setattr(llm.requests, "post", fake_post)
     content, error = llm._call_provider("blockrun", "prompt", "system", 1, 0)
     assert error is None
     assert "reasoning_effort" not in seen["json"]
     assert "include_reasoning" not in seen["json"]
+
+
+def test_response_without_post_tags_is_a_failure(monkeypatch):
+    """Demo 2026-11-09: BlockRun mistral returned bare chain-of-thought
+    with no <post> tags. That must fail the attempt (retry/fallback),
+    never be returned as post content."""
+    import llm
+
+    monkeypatch.setattr(llm, "_DISABLED_PROVIDERS", set())
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(url)
+        return _fake_response(
+            "We need to produce a short post (40-120 words). Must start "
+            "with \"$KITE\" uppercase in first line. Let's draft: the token "
+            "rose 4.2% to $2.40 on $8.5M volume, a level not seen before."
+        )
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    content, error = llm._call_provider("groq", "prompt", "system", 1, 0)
+    assert content is None
+    assert error is not None
+    assert len(calls) == 1
+
+
+def test_post_tags_are_extracted_and_reasoning_dropped(monkeypatch):
+    import llm
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _fake_response(
+            "Some reasoning before the tags. "
+            "<post>$BTC real post content here, long enough ok</post> "
+            "trailing notes after the tags."
+        )
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    content, error = llm._call_provider("groq", "prompt", "system", 1, 0)
+    assert error is None
+    assert content == "$BTC real post content here, long enough ok"
+
+
+def test_unknown_model_400_disables_like_410(monkeypatch):
+    """BlockRun proxy answers a dead model ID with HTTP 400, not 404/410
+    (2026-11-09: nvidia/deepseek-v4-flash). Same treatment: no retry,
+    provider disabled until restart."""
+    import llm
+
+    monkeypatch.setattr(llm, "_DISABLED_PROVIDERS", set())
+    _stub_keys(monkeypatch, llm)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(url)
+        return _fake_response(
+            "", status_code=400,
+            text='{"error":"Unknown model: nvidia/deepseek-v4-flash. '
+                 'Try one of: openai/gpt-6-astra"}',
+        )
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    content, error = llm._call_provider("blockrun", "prompt", "system", 2, 0)
+    assert content is None
+    assert "400" in error
+    assert len(calls) == 1  # no retry on a dead model
+    assert "blockrun" in llm._DISABLED_PROVIDERS
+    content, error = llm._call_provider("blockrun", "prompt", "system", 2, 0)
+    assert content is None
+    assert len(calls) == 1
+    assert "blockrun" not in llm._get_providers_by_priority()
 
 
 def test_empty_content_logs_finish_reason(monkeypatch, capsys):

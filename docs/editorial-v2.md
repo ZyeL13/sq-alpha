@@ -87,3 +87,34 @@ How to measure: Creator Center views per post at 24h; audit log
 violations, and GENERATED vs REJECTED counts for the quality-check
 pass rate. Review date: 2026-11-16. No new features before the first
 experiment finishes.
+
+## Fixes after the first VPS demo (2026-11-09)
+
+Demo run `python scripts/demo_editorial_v2.py` on the VPS, 14:13 WIB.
+Style selection 4/4 correct, FLAT skipped before any LLM call. NOVA
+(Groq) and MEME posts genuinely good. Three bugs found and fixed:
+
+1. `llm.py:253` SyntaxError on host python (< 3.12): f-string with
+   nested same quotes — valid only on 3.12+ (PEP 701). Docker runs
+   3.12 so production posts were unaffected; the demo runs on host
+   python. Fixed with plain concatenation (same fix zyel applied
+   on the VPS with nano — his uncommitted VPS edit must be discarded
+   before the next pull).
+2. BlockRun model IDs: the VPS `config.py` had drifted to
+   `nvidia/deepseek-v4-flash` etc., which the proxy rejects with
+   HTTP 400 "Unknown model". The snapshot config already carries the
+   correct free-tier IDs (`free/deepseek-v4-flash`,
+   `free/llama-4-maverick`, `free/mistral-large-3-675b`), confirmed
+   still listed by `npx @blockrun/clawrouter models` on 2026-11-09.
+   Fix on the VPS side: discard the `config.py` drift before pulling.
+   `llm.py` now also treats HTTP 400 "Unknown model" as a dead model
+   (disable until restart, no retry) like 404/410.
+3. Reasoning leak: BlockRun mistral returned chain-of-thought as the
+   "post" and the old gate passed it. `llm.py` now requires `<post>`
+   tags — a reply without them fails the attempt (retry/fallback)
+   instead of being returned as content. `is_reasoning_leak` gained
+   patterns for the demo's exact shapes ("We need to produce...",
+   "I need to find...", "Let's draft/count", "First line:",
+   echoed output rules, bullet lists) plus a guard so the blanket
+   lowercase-first-word pass no longer admits "We"/"I"/"Let's".
+   Regression tests use the verbatim demo outputs.

@@ -138,9 +138,15 @@ def _call_provider(provider: str, user_prompt: str, system_prompt: str,
                     # Strip thinking tags (DeepSeek specific)
                     if "<think>" in content:
                         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                    # Extract post content
+                    # Extract post content — <post> tags are mandatory.
+                    # A reply without them is reasoning or free-form text,
+                    # never a post: fail the attempt so the caller retries
+                    # or falls back, instead of queuing leaked reasoning.
                     if "<post>" in content:
                         content = content.split("<post>")[-1].split("</post>")[0].strip()
+                    else:
+                        print("  ⚠️ No <post> tags in response (possible reasoning leak)")
+                        content = ""
 
                     if len(content) >= 30:
                         return content, None
@@ -174,6 +180,15 @@ def _call_provider(provider: str, user_prompt: str, system_prompt: str,
                 print(f"  ❌ HTTP {response.status_code}: dead model, "
                       f"{provider} disabled until restart: {response.text[:200]}")
                 return None, f"Model gone (HTTP {response.status_code}) for {provider}"
+
+            elif response.status_code == 400 and "unknown model" in response.text.lower():
+                # Dead model ID reported as 400, not 404/410 (BlockRun
+                # proxy, 2026-11-09: nvidia/deepseek-v4-flash). Retrying
+                # is pointless — disable until restart like a 404/410.
+                _DISABLED_PROVIDERS.add(provider)
+                print(f"  ❌ HTTP 400: unknown model, "
+                      f"{provider} disabled until restart: {response.text[:200]}")
+                return None, f"Unknown model (HTTP 400) for {provider}"
 
             else:
                 print(f"  ❌ HTTP {response.status_code}: {response.text[:100]}")
@@ -250,5 +265,5 @@ def generate(user_prompt: str,
         print("  🔁 Falling back to next provider...")
         time.sleep(2)
     
-    print(f"  ❌ All providers failed. Tried: {", ".join(attempted)}")
+    print("  ❌ All providers failed. Tried: " + ", ".join(attempted))
     return None
