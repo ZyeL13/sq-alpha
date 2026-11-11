@@ -46,6 +46,35 @@ REJECT_PATTERNS = [
 _reject_reasons = defaultdict(int)
 
 
+# V3 long-form: article sections may use lists and headings, which
+# the short-form gate rejects as planning notes. The two list
+# patterns are the only ones dropped for articles; every other
+# reasoning-leak marker still applies, and the first-word heuristic
+# in is_reasoning_leak() is not used for articles at all (a section
+# heading is not a planning word).
+_LONGFORM_EXCLUDED_PATTERNS = {
+    r"(?m)^\s*[-•]\s",
+    r"(?m)^\s*\d+[.)]\s",
+}
+LONGFORM_REJECT_PATTERNS = [
+    p for p in REJECT_PATTERNS if p not in _LONGFORM_EXCLUDED_PATTERNS
+]
+
+# Minimum article body length (chars). Short posts reject below 100;
+# an article below this is a truncated generation, not an article.
+LONGFORM_MIN_BODY_CHARS = 600
+LONGFORM_MAX_TITLE_CHARS = 200
+
+
+def _has_leak_patterns(content: str, patterns) -> bool:
+    """Pattern-only reasoning-leak scan (no first-word heuristic)."""
+    content_lower = content.lower().strip()
+    for pattern in patterns:
+        if re.search(pattern, content_lower):
+            return True
+    return False
+
+
 def is_reasoning_leak(content: str) -> bool:
     """Check if content contains reasoning/planning language."""
     if not content:
@@ -57,9 +86,8 @@ def is_reasoning_leak(content: str) -> bool:
     # clean for 400 chars while "Let's draft:" sat at char 711 and
     # "Word count check:" at char 1077. Posts are short (40-120 words)
     # and these markers never occur in a legit post anywhere.
-    for pattern in REJECT_PATTERNS:
-        if re.search(pattern, content_lower):
-            return True
+    if _has_leak_patterns(content, REJECT_PATTERNS):
+        return True
 
     if content_lower.startswith('$'):
         return False
@@ -257,6 +285,48 @@ def validate_post(content: str, symbol: str = None) -> tuple[bool, str]:
 
     if len(content) < 100:
         return False, "Content too short"
+
+    content = re.sub(r'\$([A-Z]+)[\'"]?s\b', r'$\1', content)
+
+    return True, content
+
+
+def validate_longform(title: str, content: str, symbol: str = None) -> tuple[bool, str]:
+    """Validate a long-form article (title + body) — V3 Phase 1.
+
+    Same no-fabrication / no-advice / editorial rules as short posts,
+    but article sections may use lists and headings, so the two list
+    patterns and the first-word heuristic of the short-form gate do
+    NOT apply here. The exactly-1-cashtag rule is enforced by the
+    caller (clean_redundant_symbol_references); this gate rejects a
+    cashtag in the title, which would break the count.
+    Returns (True, cleaned_body) or (False, reason).
+    """
+    if not title or not title.strip():
+        return False, "Missing title"
+    title = title.strip()
+    if len(title) > LONGFORM_MAX_TITLE_CHARS:
+        return False, "Title too long"
+    if "$" in title:
+        return False, "Cashtag in title"
+
+    if not content:
+        return False, "Empty content"
+    content = content.strip()
+    if len(content) < LONGFORM_MIN_BODY_CHARS:
+        return False, f"Article too short ({len(content)} chars)"
+
+    if symbol and has_double_symbol(content, symbol):
+        return False, "Double symbol detected"
+
+    # Pattern-only leak scan (filtered list); no first-word heuristic:
+    # a section heading is legitimate in an article.
+    if _has_leak_patterns(content, LONGFORM_REJECT_PATTERNS):
+        return False, "Reasoning leak detected"
+
+    violation = has_editorial_violation(content)
+    if violation:
+        return False, f"Editorial violation: {violation}"
 
     content = re.sub(r'\$([A-Z]+)[\'"]?s\b', r'$\1', content)
 

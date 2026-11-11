@@ -245,5 +245,20 @@ SIMILARITY_THRESHOLD = 0.65
 # ========== DAILY TARGET ==========
 DAILY_POST_TARGET = 10  # soft limit (generation stops here; hard limit above is the backstop)
 
+# ========== V3 (EDITORIAL + VISUAL) SETTINGS ==========
+# Phase 1 (2026-11-12): API plumbing for image posts + long-form
+# articles. Caps are per-day format budgets; the experiment split
+# (6 text / 3 +image / 1 long-form) is wired in Phase 3 — Phase 1
+# only makes the formats publishable, it does not decide them.
+LONGFORM_MAX_PER_DAY = 1
+IMAGE_MAX_PER_DAY = 3
+V3_IMAGE_PROVIDER = "local"  # "local" only in Phase 1/2; "gemini" is a Phase 3 option
+ARTICLE_MAX_CHARS = 5000  # probe-tunable; Square's 20013 limit is unpublished
+# Long-form-only LLM budget. gpt-oss-120b spends reasoning tokens out
+# of the same max_tokens, so the short-form 1800 would starve a
+# 600-900-word article; watch finish_reason=length, fall back to
+# short text when the article fails validation.
+LONGFORM_MAX_TOKENS = 3500
+
 # ========== CLOSER SETTINGS ==========
 CLOSER_ENABLED = False  # True untuk aktif, False untuk mati

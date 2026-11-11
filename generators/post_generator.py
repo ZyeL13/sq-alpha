@@ -9,7 +9,8 @@ from prompts.styles import (
     insufficient_insight,
     select_editorial_style,
 )
-from generators.quality_gate import validate_post, is_similar_to_recent, clean_redundant_symbol_references, proofread_post
+from config import LONGFORM_MAX_TOKENS
+from generators.quality_gate import validate_post, validate_longform, is_similar_to_recent, clean_redundant_symbol_references, proofread_post
 from storage.post_history import record_post as add_to_recent
 import logging_config
 import logging
@@ -61,16 +62,10 @@ def news_price_context(token: Dict[str, Any]) -> str:
     return "news price context: " + "; ".join(parts)
 
 
-def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] | None = None) -> str:
-    """Build the user prompt for one post.
-
-    Editorial v2: the style is selected from the token's own data
-    (see prompts.styles.select_editorial_style) and the prompt carries
-    the style guidance plus the voice calibration. Nothing is forced
-    verbatim — no hook first line, no angle paragraph, no closing line.
-    The old build_prompt forced all three, which is exactly the
-    identical-structure template Editorial v2 removes.
-    """
+def _data_section(token: Dict[str, Any]) -> str:
+    """The data anchor + range/news context shared by short and
+    long-form prompts. Same numbers, same wording — one source of
+    truth so the two formats can never disagree about the data."""
     symbol = token["symbol"]
     price = token.get("price", 0)
     chg = token.get("price_change_percent", 0)
@@ -96,6 +91,21 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
         data_section += news_context
     if price_context_line:
         data_section += price_context_line
+    return data_section
+
+
+def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] | None = None) -> str:
+    """Build the user prompt for one post.
+
+    Editorial v2: the style is selected from the token's own data
+    (see prompts.styles.select_editorial_style) and the prompt carries
+    the style guidance plus the voice calibration. Nothing is forced
+    verbatim — no hook first line, no angle paragraph, no closing line.
+    The old build_prompt forced all three, which is exactly the
+    identical-structure template Editorial v2 removes.
+    """
+    symbol = token["symbol"]
+    data_section = _data_section(token)
 
     style = select_editorial_style(token, scores)
 
@@ -135,6 +145,132 @@ RULES:
 
 Write the post inside <post> tags. Nothing outside the tags."""
     return prompt
+
+
+def build_longform_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] | None = None) -> str:
+    """Build the user prompt for one long-form article (V3 Phase 1).
+
+    Same data section, system prompt, style selection and voice
+    calibration as the short form — only the shape changes: a title
+    line, then a structured article (thesis, what happened, why it
+    matters, bull case, bear case, limitations/invalidation,
+    conclusion). Section labels are plain uppercase lines, never
+    markdown '#' headings (Square parses '#' as a hashtag and
+    clean_for_square strips it).
+    """
+    symbol = token["symbol"]
+    data_section = _data_section(token)
+    style = select_editorial_style(token, scores)
+
+    prompt = f"""You are writing a long-form market analysis article for Binance Square.
+
+GOAL: Explain what is happening with ${symbol} and what would prove the read wrong.
+
+DATA:
+{data_section}
+
+EDITORIAL STYLE: {style}
+{STYLE_GUIDANCE[style]}
+
+{VOICE_CALIBRATION}
+
+STRUCTURE — write the article inside <post> tags, exactly like this:
+- Line 1: the article title, in Title Case, on its own line. No cashtag in the title.
+- Then ONE blank line.
+- Then the body, 600-900 words, in sections. Each section starts with
+  its label on its own line in UPPERCASE, then a blank line, then the
+  prose. Use these sections, in this order:
+  THESIS, WHAT HAPPENED, WHY IT MATTERS, BULL CASE, BEAR CASE,
+  LIMITS AND INVALIDATION, CONCLUSION.
+  A section may use a short list when the data genuinely calls for
+  one; prose is the default.
+
+RULES:
+- Lowercase everything except ${symbol} and other $TOKENS
+- Use only the DATA above. Never invent numbers, technical levels,
+  catalysts, or market sentiment.
+- An interpretation is a view with reasons, not a trade instruction:
+  never tell readers to buy, sell, hold, enter, or exit, and never
+  present the article as financial advice.
+- Bull case and bear case must both be argued from the DATA, not
+  from vibes. If one side has no support in the data, say so plainly
+  instead of inventing it.
+- State the limits of the read and the condition that would
+  invalidate it. No fabricated certainty.
+- Refer to the token as ${symbol} (with $ prefix, uppercase) exactly ONCE, in the first line of the body. In every later sentence use "the token" — never repeat the cashtag.
+- Do not mention related tokens unless directly relevant to the data.
+- $SYMBOL and all token tickers MUST be uppercase: $XRP not $xrp, $BTC not $btc
+- Volume format: use capital M, $106.0M not $106.0m
+- No first or second person: no "i", "we", "you".
+- Separate paragraphs with ONE blank line. Never write large text blocks.
+
+Write the article inside <post> tags. Nothing outside the tags."""
+    return prompt
+
+
+def generate_longform(token: Dict[str, Any], category: str, scores: Dict[str, float]) -> Optional[tuple[str, str]]:
+    """Generate one long-form article. Returns (title, body) or None.
+
+    Mirrors generate_post: skip check first, ONE LLM call (with the
+    long-form-only max_tokens bump), format-aware validation, exactly-1
+    cashtag cleaning. proofread_post is NOT applied — its paragraph
+    reshaping would mangle article sections.
+    """
+    skip_reason = insufficient_insight(token, scores)
+    if skip_reason:
+        print(f"  ⏭️ Skipping long-form ${token['symbol']}: {skip_reason}")
+        audit_logger.info(f"SKIPPED_LONGFORM|{token['symbol']}|{category}|{skip_reason}")
+        return None
+
+    prompt = build_longform_prompt(token, category, scores)
+    content = generate(prompt, system_prompt=REBATE_SYSTEM, category=category,
+                       max_tokens=LONGFORM_MAX_TOKENS)
+
+    if not content or not isinstance(content, str):
+        audit_logger.warning(f"GENERATE_LONGFORM_FAILED|{token['symbol']}|{category}|no_content")
+        return None
+
+    # Line 1 is the title, then a blank line, then the body.
+    lines = [ln for ln in content.split("\n")]
+    title = ""
+    body_lines = []
+    for i, line in enumerate(lines):
+        if line.strip():
+            title = line.strip().lstrip("#").strip()
+            body_lines = lines[i + 1:]
+            break
+    body = "\n".join(body_lines).strip()
+    if not title or not body:
+        audit_logger.info(f"REJECTED_LONGFORM|{token['symbol']}|{category}|no_title_or_body")
+        return None
+
+    # A cashtag in the title would break the exactly-once count for
+    # the article as published — strip the $ and keep the ticker name.
+    import re
+    title = re.sub(r"\$([A-Z]+)", r"\1", title)
+
+    valid, result = validate_longform(title, body, symbol=token["symbol"])
+    if not valid:
+        logger.warning(f"Quality gate REJECTED long-form for ${token['symbol']}: {result}")
+        audit_logger.info(f"REJECTED_LONGFORM|{token['symbol']}|{category}|{result}")
+        return None
+    body = result.strip()
+
+    symbol = token["symbol"]
+    if f"${symbol}" not in body.upper():
+        body = f"${symbol} " + body
+
+    body = clean_redundant_symbol_references(body, symbol)
+
+    if is_similar_to_recent(title + "\n\n" + body):
+        print("  🔄 Long-form too similar to recent, skipping...")
+        return None
+
+    add_to_recent(title + "\n\n" + body)
+
+    audit_logger.info(f"GENERATED_LONGFORM|{symbol}|{category}|{len(body)}_chars")
+    return title, body
+
 
 def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]) -> Optional[str]:
     # Quality over quota: skip before any LLM call when there is

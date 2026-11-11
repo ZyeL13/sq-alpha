@@ -339,19 +339,22 @@ def poster_worker():
                     time.sleep(10)
                 continue
             
-            for post_id, post, cat, sym, hook, session, provider in due_posts:
+            for post_id, post, cat, sym, hook, session, provider, fmt, title, image_paths in due_posts:
                 if not can_post():
                     check_and_sleep()
                     break
-                
-                print(f"  📝 Posting {sym} as {cat}...")
+
+                print(f"  📝 Posting {sym} as {cat} [{fmt}]...")
                 success = post_to_targets(
                     content=post,
                     category=cat,
                     symbol=sym,
                     hook=hook,
                     session=session,
-                    llm_provider=provider
+                    llm_provider=provider,
+                    format=fmt or "short",
+                    title=title,
+                    image_paths=image_paths,
                 )
                 
                 if success:
