@@ -55,11 +55,14 @@ def _record_request(provider_name: str):
     _request_history[provider_name].append(time.time())
 
 
-def _call_provider(provider: str, user_prompt: str, system_prompt: str, 
-                   max_retries: int, backoff: int) -> tuple[str | None, str | None]:
+def _call_provider(provider: str, user_prompt: str, system_prompt: str,
+                   max_retries: int, backoff: int,
+                   max_tokens: int | None = None) -> tuple[str | None, str | None]:
     """
     Call a specific provider.
     Returns (content, error_message)
+    max_tokens overrides the provider's configured budget when given
+    (V3 long-form only — short posts always use the configured value).
     """
     cfg = LLM_PROVIDERS.get(provider)
     if not cfg:
@@ -84,7 +87,7 @@ def _call_provider(provider: str, user_prompt: str, system_prompt: str,
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "max_tokens": cfg["max_tokens"],
+        "max_tokens": max_tokens if max_tokens is not None else cfg["max_tokens"],
         "temperature": cfg["temperature"],
         "top_p": cfg["top_p"],
     }
@@ -212,11 +215,14 @@ def generate(user_prompt: str,
              category: str = None,
              max_retries: int = 2,
              backoff: int = 10,
-             use_cache: bool = True) -> str | None:
+             use_cache: bool = True,
+             max_tokens: int | None = None) -> str | None:
     """
     Generate content with priority fallback.
     Higher weight = higher priority (tried first).
     Falls back to next provider if current fails.
+    max_tokens overrides every provider's configured budget for this
+    call only (V3 long-form); None keeps the configured values.
     """
     if system_prompt is None:
         system_prompt = DEFAULT_SYSTEM
@@ -233,7 +239,13 @@ def generate(user_prompt: str,
             print(f"  ❌ Unknown provider: {provider}")
             return None
         
-        content, error = _call_provider(provider, user_prompt, system_prompt, max_retries, backoff)
+        # max_tokens override is passed only when given, so the
+        # default call path stays identical to the pre-V3 signature.
+        if max_tokens is not None:
+            content, error = _call_provider(provider, user_prompt, system_prompt, max_retries, backoff,
+                                            max_tokens=max_tokens)
+        else:
+            content, error = _call_provider(provider, user_prompt, system_prompt, max_retries, backoff)
         if content and use_cache:
             cache_set(user_prompt, system_prompt, cfg["model"], cfg["temperature"], content)
         return content
@@ -252,7 +264,11 @@ def generate(user_prompt: str,
         attempted.append(prov)
         print(f"  🎯 Trying {prov} (priority {len(attempted)}/{len(priority_list)})...")
         
-        content, error = _call_provider(prov, user_prompt, system_prompt, max_retries, backoff)
+        if max_tokens is not None:
+            content, error = _call_provider(prov, user_prompt, system_prompt, max_retries, backoff,
+                                            max_tokens=max_tokens)
+        else:
+            content, error = _call_provider(prov, user_prompt, system_prompt, max_retries, backoff)
         
         if content:
             # Save to cache with provider-specific key

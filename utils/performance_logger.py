@@ -27,6 +27,7 @@ def log_post(
     post_content: str,
     llm_provider: str = "",
     post_id: str = "",
+    format: str = "short",
 ):
     """Log a posted entry. Call immediately after successful post."""
     # Validasi
@@ -46,6 +47,7 @@ def log_post(
         "session": session,
         "llm": llm_provider,
         "post_id": post_id or f"{symbol}_{int(time.time())}",
+        "format": format,
         "length": len(post_content),
         # fill these later via update_metrics()
         "views": None,
