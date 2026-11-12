@@ -2,6 +2,7 @@
 import re
 from collections import defaultdict
 from storage.post_history import get_recent_posts
+from prompts.styles import EDITORIAL_FORBIDDEN
 
 # Patterns that indicate reasoning/planning (HARUS ditolak)
 REJECT_PATTERNS = [
@@ -19,6 +20,26 @@ REJECT_PATTERNS = [
     r"(?i)^hmm",
     r"(?i)let me check",
     r"(?i)hold on",
+    # Demo 2026-11-09 (BlockRun mistral): chain-of-thought returned as
+    # the "post" and passed the old gate. These cover its exact shapes:
+    # "We need to produce a short post...", "I need to find an anomaly...",
+    # "Let's draft:", "First line: ...", "Let's count approximate...",
+    # and the echoed output rules ("No explanations, no reasoning...").
+    r"(?i)(we need to (produce|write|create|craft|draft|make|do))",
+    r"(?i)(i need to (find|figure out|check|identify|look|see))",
+    r"(?i)(let'?s (draft|count|try|start|write|plan))",
+    r"(?i)(first line:|paragraph \d|word count|let'?s count)",
+    r"(?i)no (explanations|analysis notes|reasoning|drafts)",
+    # A bullet list is planning notes, never a post (posts are 1-2
+    # prose paragraphs, no lists).
+    r"(?m)^\s*[-•]\s",
+    # A numbered list ("Word count check:\n1. $ORBIT\n2. traded...") is
+    # planning notes, never a post — demo 2, 2026-11-09.
+    r"(?m)^\s*\d+[.)]\s",
+    # Echoed style guidance ("Data observation style: Let numbers
+    # lead...") and meta-commentary about the rules themselves.
+    r"(?i)(analytical|contrarian|data observation|dry humor)\s+style\s*:",
+    r"(?i)(the rules say|i can say something like)",
 ]
 
 # For tracking reject reasons
@@ -31,9 +52,13 @@ def is_reasoning_leak(content: str) -> bool:
         return True
 
     content_lower = content.lower().strip()
-    first_part = content_lower[:400]
+    # Scan the WHOLE content, not just the first 400 chars. Demo 2
+    # (2026-11-09) proved the window too narrow: the ORBIT leak looked
+    # clean for 400 chars while "Let's draft:" sat at char 711 and
+    # "Word count check:" at char 1077. Posts are short (40-120 words)
+    # and these markers never occur in a legit post anywhere.
     for pattern in REJECT_PATTERNS:
-        if re.search(pattern, first_part):
+        if re.search(pattern, content_lower):
             return True
 
     if content_lower.startswith('$'):
@@ -58,10 +83,34 @@ def is_reasoning_leak(content: str) -> bool:
     if first_word in valid_starts:
         return False
 
+    # Reasoning often opens with a first-person/planning word that the
+    # blanket lowercase pass below would otherwise let through
+    # ("We need to produce a short post..." — demo 2026-11-09), or with
+    # a fragment of the echoed output rules ("tags" — the tail of
+    # "<post> tags", demo 2 ORBIT).
+    if first_word in ("we", "i", "let", "lets", "let's", "tags", "tag"):
+        return True
+
     if len(first_word) <= 10 and re.match(r'^[a-z]+$', first_word):
         return False
 
     return True
+
+
+def has_editorial_violation(content: str) -> str | None:
+    """Editorial v2 check: reject template habits and hype phrases.
+
+    Returns the offending phrase, or None when the content is clean.
+    This is what the week-one KPI "0 editorial violations" counts:
+    a post that trips this never reaches the queue.
+    """
+    if not content:
+        return None
+    lowered = content.lower()
+    for phrase in EDITORIAL_FORBIDDEN:
+        if phrase in lowered:
+            return phrase
+    return None
 
 
 def has_double_symbol(content: str, symbol: str) -> bool:
@@ -76,36 +125,28 @@ def has_double_symbol(content: str, symbol: str) -> bool:
 
 
 def clean_redundant_symbol_references(content: str, symbol: str) -> str:
-    """Remove $SYMBOL from middle, keep only first and last occurrence"""
+    """Keep the cashtag exactly once (first occurrence).
+
+    Every later $SYMBOL becomes "the token" instead of being deleted,
+    so sentences stay grammatical ("volume on the token is high",
+    "price of the token stayed") instead of breaking ("volume on is
+    high"). Only the post's own symbol is touched — other tickers
+    (e.g. $BTC in a comparison) are left alone.
+    """
     if not content or not symbol:
         return content
-    
+
     import re
     symbol_upper = symbol.upper()
-    pattern = re.compile(rf'\${re.escape(symbol_upper)}', re.IGNORECASE)
+    pattern = re.compile(rf"\${re.escape(symbol_upper)}\b", re.IGNORECASE)
     matches = list(pattern.finditer(content))
-    
-    # Hanya bersihkan jika muncul lebih dari 2 kali
-    if len(matches) <= 4:
+
+    if len(matches) <= 1:
         return content
-    
-    # Hapus hanya yang di tengah (pertahankan 2: awal dan akhir)
-    keep_indices = {matches[0].start(), matches[-1].start()}
-    result = []
-    last_end = 0
-    for match in matches:
-        start, end = match.start(), match.end()
-        if start in keep_indices:
-            result.append(content[last_end:end])
-        else:
-            # Skip this $SYMBOL, add space instead
-            result.append(content[last_end:start])
-        last_end = end
-    result.append(content[last_end:])
-    
-    cleaned = ''.join(result)
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    return cleaned
+
+    first_end = matches[0].end()
+    head, tail = content[:first_end], content[first_end:]
+    return head + pattern.sub("the token", tail)
 
 def proofread_post(content: str, symbol: str) -> str:
     """Clean up formatting, remove redundant phrases, ensure consistent CTA"""
@@ -171,16 +212,17 @@ def proofread_post(content: str, symbol: str) -> str:
     content = re.sub(r'\n{3,}', '\n\n', content)
     content = re.sub(r'\n{2,}', '\n\n', content)
     
-    # 8. Tambahkan $SYMBOL di awal jika hilang
-    if not content.startswith(f"${symbol_upper}"):
+    # 8. Tambahkan $SYMBOL di awal hanya jika tidak ada sama sekali.
+    # (Kalau ticker sudah ada di tengah, jangan tambah lagi di depan —
+    # cleaner di atas sudah memastikan ticker cuma muncul sekali.)
+    if f"${symbol_upper}" not in content.upper():
         content = f"${symbol_upper} " + content
-    
-    # 9. Tambahkan CTA di akhir jika tidak ada
+
+    # 9. No forced sign-off. Editorial v2 forbids template closers
+    # ("watching from here", "monitoring the session", "tracking the
+    # move"): a post ends where its observation ends. The old code
+    # appended "tracking the move." here — removed.
     content = content.strip()
-    cta_pattern = rf'tracking \${symbol_upper}\.'
-    if not re.search(cta_pattern, content, re.IGNORECASE):
-        content += f"\n\ntracking ${symbol_upper}."
-    
     # 10. Perbaiki spasi ganda
     content = re.sub(r' {2,}', ' ', content)
     
@@ -208,6 +250,10 @@ def validate_post(content: str, symbol: str = None) -> tuple[bool, str]:
     
     if is_reasoning_leak(content):
         return False, "Reasoning leak detected"
+
+    violation = has_editorial_violation(content)
+    if violation:
+        return False, f"Editorial violation: {violation}"
 
     if len(content) < 100:
         return False, "Content too short"

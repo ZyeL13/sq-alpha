@@ -19,22 +19,28 @@ def get_current_session() -> str:
     else:
         return "night"
 
-# Base delays in seconds
+# Base delays in seconds. Posts are chained off the last scheduled post
+# (orchestrator: scheduled_time = last_time + get_post_delay()), so this
+# is also the minimum gap between consecutive posts: 75-90 minutes.
+# 10 posts/day x ~80 min gaps fits a 07:30-23:30 WIB window.
 SESSION_BASE_DELAYS = {
-    "asia": 600,     # 10 menit
-    "europe": 600,   # 10 menit
-    "overlap": 600,  # 10 menit
-    "us_late": 600,  # 10 menit
-    "night": 600,    # 10 menit
+    "asia": 4800,     # 80 menit
+    "europe": 4800,   # 80 menit
+    "overlap": 4800,  # 80 menit
+    "us_late": 4800,  # 80 menit
+    "night": 4800,    # 80 menit
 }
+
+MIN_POST_GAP_SECONDS = 4500  # 75 menit — jangan di bawah ini (anti-spam)
+MAX_POST_GAP_SECONDS = 5400  # 90 menit
 
 def get_post_delay() -> int:
     """Get randomized delay based on current session"""
     session = get_current_session()
-    base = SESSION_BASE_DELAYS.get(session, 900)
+    base = SESSION_BASE_DELAYS.get(session, 4800)
     jitter = random.uniform(0.85, 1.15)  # ±15% jitter
     delay = int(base * jitter)
-    return max(450, min(750, delay))  # between 450-750 seconds
+    return max(MIN_POST_GAP_SECONDS, min(MAX_POST_GAP_SECONDS, delay))
 
 def get_dynamic_post_limit() -> int:
     """Get post limit based on current session (for soft limiting)"""
