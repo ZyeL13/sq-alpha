@@ -15,8 +15,11 @@ from processors.normalize import normalize_token
 from processors.classify import classify
 from processors.score import score_token
 from processors.dedupe import is_duplicate, mark_posted, clear_old_entries
-from generators.post_generator import generate_post
+from prompts.styles import select_post_format
+from generators.post_generator import generate_longform, generate_post
+from schedulers.card_renderer import CardRenderError, render_card
 from schedulers.poster import post_to_targets
+from storage.format_counter import get_format_counts, increment_format_count
 from config import (
     PROCESSOR_WORKERS,
     COINGECKO_ENABLED,
@@ -215,8 +218,62 @@ def collector_worker():
             time.sleep(30)
 
 
+def prepare_post(token, category, scores):
+    """Decide the format, generate once, render the card if needed.
+
+    The format is decided BEFORE generation (spec section 7: no
+    extra LLM passes — exactly one generation call per post).
+    Returns (content, format, title, image_paths), or None when
+    nothing could be generated. Degradation, never drops:
+    - image + render failure -> scheduled as short text, and no
+      image slot is consumed.
+    - longform + render failure -> scheduled as an article without
+      a cover (the poster publishes coverless articles by design).
+      Scheduling a 600-900-word article as "short" would truncate
+      it to 900 chars, so the format is kept.
+    - longform + generation failure -> ONE fallback generate_post
+      call, audit-logged; the only path with a second LLM call.
+    """
+    fmt = select_post_format(token, category, scores, get_format_counts())
+    symbol = token.get("symbol", "?")
+    title = None
+    image_paths = None
+
+    if fmt == "longform":
+        result = generate_longform(token, category, scores)
+        if result is None:
+            print(f"  ⚠️ Long-form failed for ${symbol}, falling back to short text")
+            audit_logger.info(f"LONGFORM_FALLBACK|{symbol}|{category}|generate_failed")
+            fmt = "short"
+            content = generate_post(token, category, scores)
+            if content is None:
+                return None
+            return content, fmt, None, None
+        title, content = result
+        try:
+            image_paths = [render_card(token)]
+        except CardRenderError as e:
+            print(f"  ⚠️ Cover render failed for ${symbol} ({e}), publishing without cover")
+            audit_logger.info(f"IMAGE_FALLBACK|{symbol}|cover_render_failed")
+            image_paths = None
+        return content, fmt, title, image_paths
+
+    content = generate_post(token, category, scores)
+    if content is None:
+        return None
+    if fmt == "image":
+        try:
+            image_paths = [render_card(token)]
+        except CardRenderError as e:
+            print(f"  ⚠️ Card render failed for ${symbol} ({e}), falling back to short text")
+            audit_logger.info(f"IMAGE_FALLBACK|{symbol}|render_failed")
+            fmt = "short"
+            image_paths = None
+    return content, fmt, title, image_paths
+
+
 def processor_worker(worker_id: int):
-    """Process tokens: normalize → classify → generate → schedule post"""
+    """Process tokens: normalize → classify → format-select → generate → schedule post"""
     print(f"  🧠 Processor {worker_id} started")
     
     from prompts.styles import get_hook
@@ -263,13 +320,14 @@ def processor_worker(worker_id: int):
                     if "volume_at_news" in raw:
                         token["volume_at_news"] = raw["volume_at_news"]
 
-                    post = generate_post(token, cat, scored["scores"])
-                    if post:
+                    prepared = prepare_post(token, cat, scored["scores"])
+                    if prepared:
+                        post, fmt, title, image_paths = prepared
                         current_time = time.time()
                         scheduled_queue = ScheduledPostQueue()
-                        
+
                         last_time = scheduled_queue.get_last_post_time()
-                        
+
                         delay = get_post_delay()
                         if last_time and last_time > current_time:
                             scheduled_time = last_time + delay
@@ -277,9 +335,9 @@ def processor_worker(worker_id: int):
                         else:
                             scheduled_time = current_time + delay
                             print(f"  📅 Queue empty, scheduling in {delay}s")
-                        
+
                         session = get_current_session()
-                        
+
                         scheduled_queue.add_post(
                             post=post,
                             category=cat,
@@ -287,17 +345,25 @@ def processor_worker(worker_id: int):
                             scheduled_time=scheduled_time,
                             hook=hook,
                             session=session,
-                            provider="blockrun"
+                            provider="blockrun",
+                            format=fmt,
+                            title=title,
+                            image_paths=image_paths,
                         )
-                        
+
+                        # Scheduling is the commitment point for the
+                        # per-format daily caps (see storage/format_counter).
+                        if fmt in ("image", "longform"):
+                            increment_format_count(fmt)
+
                         mark_posted(token["symbol"], cat, hook, market_cap)
-                        
+
                         wait_min = (scheduled_time - current_time) / 60
-                        print(f"  ✍️ P{worker_id}: {token['symbol']} → {cat} scheduled in {wait_min:.1f} min")
-                        
+                        print(f"  ✍️ P{worker_id}: {token['symbol']} → {cat} [{fmt}] scheduled in {wait_min:.1f} min")
+
                         # AUDIT LOG: Post dijadwalkan
-                        audit_logger.info(f"SCHEDULED|{token['symbol']}|{cat}|{hook}|{session}|{int(scheduled_time)}")
-                        logger.info(f"POST_SCHEDULED: {token['symbol']} -> {cat} scheduled in {wait_min:.1f} min")
+                        audit_logger.info(f"SCHEDULED|{token['symbol']}|{cat}|{hook}|{session}|{int(scheduled_time)}|{fmt}")
+                        logger.info(f"POST_SCHEDULED: {token['symbol']} -> {cat} [{fmt}] scheduled in {wait_min:.1f} min")
                         time.sleep(random.uniform(2, 5))
                     else:
                         print(f"  ⚠️ P{worker_id}: {token['symbol']} → {cat} (no post)")

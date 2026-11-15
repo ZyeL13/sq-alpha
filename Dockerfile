@@ -9,8 +9,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TZ=Asia/Jakarta
 
 # tzdata: ZoneInfo("Asia/Jakarta") di config.py butuh database zona waktu.
+# fonts-dejavu-core: DejaVu Sans untuk card renderer V3 (Pillow tidak
+# membawa font TTF; tanpa ini renderer jatuh ke font default PIL).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata \
+    && apt-get install -y --no-install-recommends tzdata fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

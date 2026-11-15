@@ -30,6 +30,7 @@ DEDUP_FILE = f"{CACHE_DIR}/dedup_cache.json"
 NEWS_DEDUP_FILE = f"{CACHE_DIR}/news_dedup.json"
 NEWS_REVIEW_FILE = f"{CACHE_DIR}/news_review.json"
 POST_COUNTER_FILE = f"{CACHE_DIR}/post_counter.json"
+FORMAT_COUNTER_FILE = f"{CACHE_DIR}/format_counter.json"
 FIRST_SEEN_FILE = f"{CACHE_DIR}/first_seen.json"
 COINGECKO_CACHE_FILE = f"{CACHE_DIR}/coingecko_cache.json"
 LLM_CACHE_FILE = f"{CACHE_DIR}/llm_cache.json"
@@ -253,9 +254,11 @@ DAILY_POST_TARGET = 10  # soft limit (generation stops here; hard limit above is
 
 # ========== V3 (EDITORIAL + VISUAL) SETTINGS ==========
 # Phase 1 (2026-11-12): API plumbing for image posts + long-form
-# articles. Caps are per-day format budgets; the experiment split
-# (6 text / 3 +image / 1 long-form) is wired in Phase 3 — Phase 1
-# only makes the formats publishable, it does not decide them.
+# articles. Phase 2 (2026-11-15): conditional format selection wires
+# these caps into the processor (see prompts.styles.select_post_format
+# and storage.format_counter). Caps are per-day format budgets for
+# the experiment split (6 text / 3 +image / 1 long-form targets);
+# a slot stays empty when no material justifies it.
 LONGFORM_MAX_PER_DAY = 1
 IMAGE_MAX_PER_DAY = 3
 V3_IMAGE_PROVIDER = "local"  # "local" only in Phase 1/2; "gemini" is a Phase 3 option
