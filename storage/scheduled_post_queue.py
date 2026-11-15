@@ -122,6 +122,78 @@ class ScheduledPostQueue:
                 ))
             return results
     
+    def claim_due_post(self) -> Optional[Tuple]:
+        """Atomically claim the earliest due post (cross-process safe).
+
+        In ONE SQLite transaction (BEGIN IMMEDIATE): select the
+        earliest due row and delete it, then commit. A second
+        process sharing this queue.db (e.g. a duplicate pipeline
+        container) blocks on the write lock instead of reading the
+        same row, so one post can never be claimed twice.
+        get_due_posts() + remove_post() cannot do this: the SELECT
+        and the DELETE are separate transactions, so two processes
+        can both read a row before either deletes it.
+
+        Trade-off: if the process crashes (or cannot post) between
+        claim and post, that one post is lost — it was already
+        deleted. That is strictly better than two processes
+        double-posting the same row to Binance Square.
+
+        Returns the row in the same 10-tuple shape as get_due_posts
+        (image_paths JSON-decoded), or None when no post is due or
+        the write lock could not be acquired within the timeout.
+        """
+        import json
+
+        now = time.time()
+        row = None
+        with self._lock:
+            conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
+            try:
+                # Autocommit: BEGIN/COMMIT are managed explicitly so
+                # the SELECT + DELETE stay in one transaction.
+                conn.isolation_level = None
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    cursor = conn.execute(
+                        """SELECT id, post, category, symbol, hook, session, provider,
+                                  format, title, image_paths
+                           FROM scheduled_posts
+                           WHERE scheduled_time <= ?
+                           ORDER BY scheduled_time
+                           LIMIT 1""",
+                        (now,),
+                    )
+                    row = cursor.fetchone()
+                    if row is not None:
+                        conn.execute("DELETE FROM scheduled_posts WHERE id = ?", (row[0],))
+                    conn.execute("COMMIT")
+                except Exception:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                    raise
+            except sqlite3.OperationalError:
+                # Write-lock timeout: another process holds the lock.
+                # Nothing was claimed; the caller retries next poll.
+                return None
+            finally:
+                conn.close()
+
+        if row is None:
+            return None
+        (post_id, post, category, symbol, hook, session, provider,
+         fmt, title, image_paths_json) = row
+        image_paths = None
+        if image_paths_json:
+            try:
+                image_paths = json.loads(image_paths_json)
+            except (ValueError, TypeError):
+                image_paths = None
+        return (post_id, post, category, symbol, hook, session, provider,
+                fmt or "short", title, image_paths)
+
     def remove_post(self, post_id: int):
         """Remove a post after publishing"""
         with self._lock:

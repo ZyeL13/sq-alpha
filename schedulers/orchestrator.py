@@ -52,6 +52,13 @@ _news_cache = []
 _last_news_refresh = 0
 
 
+def has_daily_quota(queued: int) -> bool:
+    """Quota-aware scheduling gate: posted today + already queued
+    must stay under DAILY_POST_LIMIT, so the queue cannot overfill
+    past the daily cap and burst-fire at the 07:00 WIB reset."""
+    return get_today_posts() + queued < DAILY_POST_LIMIT
+
+
 def can_post_now(min_interval: int = 10):
     """Check if we can post now (min_interval seconds between posts)"""
     now = time.time()
@@ -228,7 +235,7 @@ def processor_worker(worker_id: int):
             token = normalize_token(raw, source=source)
             cat = classify(token)
             
-            if cat and can_post():
+            if cat and has_daily_quota(ScheduledPostQueue().get_post_count()):
                 try:
                     # Score gate: skip tokens whose signal is too weak to
                     # be worth a post (see processors/score.py).
@@ -301,6 +308,11 @@ def processor_worker(worker_id: int):
                     print(f"  ⚠️ P{worker_id}: Error processing {token.get('symbol', '?')}: {inner_e}")
                     audit_logger.info(f"ERROR|{token.get('symbol', '?')}|{cat}|{str(inner_e)[:50]}")
                     continue
+            elif cat:
+                # Daily quota full (posted + queued): skip before the
+                # LLM call so the queue cannot overfill past the cap.
+                print(f"  🚫 P{worker_id}: {token['symbol']} → {cat} (daily quota full, skipping)")
+                audit_logger.info(f"QUOTA_FULL|{token['symbol']}|{cat}")
             
             time.sleep(random.uniform(0.5, 1))
             
@@ -327,7 +339,28 @@ def poster_worker():
                 time.sleep(wait_time)
                 continue
             
-            due_posts = scheduled_queue.get_due_posts(limit=1)
+            # Drop stale due posts (>90 min past scheduled time) at
+            # post time, so a backlog built up while the poster was
+            # sleeping at the daily limit cannot burst-fire at reset.
+            stale = scheduled_queue.delete_old_posts(5400)
+            if stale:
+                print(f"  🗑️ Dropped {stale} stale scheduled post(s) (>90 min overdue)")
+                audit_logger.info(f"STALE_DROPPED|{stale}|90min")
+
+            # Do not claim a row we cannot post: the claim deletes
+            # the row, so re-check the daily limit first (the
+            # top-of-loop check may have passed before another
+            # process consumed the remaining quota).
+            if not can_post():
+                if check_and_sleep():
+                    break
+                continue
+
+            # Atomic cross-process claim: the row is deleted inside
+            # the claim transaction, so a second pipeline process
+            # sharing this queue.db can never post the same row.
+            claimed = scheduled_queue.claim_due_post()
+            due_posts = [claimed] if claimed is not None else []
             
             if not due_posts:
                 next_time = scheduled_queue.get_next_post_time()
@@ -369,7 +402,8 @@ def poster_worker():
                     # AUDIT LOG: Post gagal
                     audit_logger.info(f"FAILED|{sym}|{cat}|post_to_targets_failed")
                 
-                scheduled_queue.remove_post(post_id)
+                # No remove_post(): claim_due_post() already deleted
+                # the row atomically when it was claimed.
                 check_and_sleep()
             
             time.sleep(2)
