@@ -496,6 +496,108 @@ def select_editorial_style(token, scores=None) -> str:
     return "analytical"
 
 
+def _range_position(token) -> float:
+    """Position of price inside the 24h high/low range, 0..1.
+
+    Derived from the ticker's own high/low/price when available
+    (normalize_token drops the collector's range_position field, so
+    the live pipeline cannot rely on it); falls back to the token's
+    range_position field, then to the midpoint. Same derivation as
+    schedulers/card_renderer._range_position, kept separate so
+    prompts never imports schedulers.
+    """
+    high = token.get("high_24h") or 0
+    low = token.get("low_24h") or 0
+    price = token.get("price") or 0
+    if high and low and high > low and price:
+        return max(0.0, min(1.0, (price - low) / (high - low)))
+    rp = token.get("range_position")
+    if rp is not None:
+        try:
+            return max(0.0, min(1.0, float(rp)))
+        except (TypeError, ValueError):
+            pass
+    return 0.5
+
+
+def select_post_format(token, category, scores=None, counts=None) -> str:
+    """Decide the publishing format BEFORE generation: "short",
+    "image", or "longform".
+
+    The decision is deterministic from the token's own data plus the
+    per-format counts already scheduled today — never a draw — and
+    reuses the signals and thresholds of select_editorial_style and
+    processors/score.py instead of inventing new ones. `category` is
+    accepted for symmetry with the (token, category, scores) call
+    convention; no rule uses it yet. `counts` is {"image": n,
+    "longform": n} (None counts as zeros); caps come from config.
+
+    Long-form is checked first (rarest, strictest) and needs ONE
+    justification — spec section 2B: never convert an ordinary
+    observation into an article merely to use the feature:
+    1. divergence: anomaly >= 0.7 (same bar as data_observation).
+    2. volume event: 24h volume moved >= 50% since the news landed
+       (same bar as data_observation's second rule).
+    3. contradiction: the tape since the catalyst contradicts the
+       day's story (same rule as the contrarian style).
+    4. catalyst follow-through: a catalyst exists and price moved
+       >= 5% since it landed — a story with a second act.
+    5. range edge + move: price at <= 0.10 or >= 0.90 of its 24h
+       range with a >= 5% move (a market-structure extreme).
+
+    Image needs ONE data-heavy justification (spec section 4: the
+    card must carry an observation worth visualising):
+    1. anomaly >= 0.5 (volume/price divergence worth showing).
+    2. |24h change| >= 10% (a big move — the card carries it).
+    3. 24h volume > $50M (liquidity score >= 0.8: a big volume day).
+    4. range edge: <= 0.15 or >= 0.85 (the thresholds _data_section
+       uses for near-high/low context — the range bar adds info).
+
+    When a format's cap is already used, selection falls through to
+    the next format; ordinary tokens always land on "short".
+    """
+    from config import IMAGE_MAX_PER_DAY, LONGFORM_MAX_PER_DAY
+
+    counts = counts or {}
+    image_used = counts.get("image", 0) or 0
+    longform_used = counts.get("longform", 0) or 0
+
+    chg = token.get("price_change_percent", 0) or 0
+    vol = token.get("volume_24h", 0) or 0
+    has_news = bool(token.get("news_catalyst"))
+    range_pos = _range_position(token)
+    anomaly = _anomaly(token, scores)
+    chg_news = _chg_since_news(token)
+    vol_chg_news = _vol_chg_since_news(token)
+
+    if longform_used < LONGFORM_MAX_PER_DAY:
+        contrarian = (
+            chg_news is not None
+            and abs(chg_news) >= 3
+            and abs(chg) >= 3
+            and (chg_news > 0) != (chg > 0)
+        )
+        catalyst_followthrough = (
+            has_news and chg_news is not None and abs(chg_news) >= 5
+        )
+        range_edge = (range_pos <= 0.10 or range_pos >= 0.90) and abs(chg) >= 5
+        volume_event = vol_chg_news is not None and abs(vol_chg_news) >= 50
+        if anomaly >= 0.7 or volume_event or contrarian or catalyst_followthrough or range_edge:
+            return "longform"
+
+    if image_used < IMAGE_MAX_PER_DAY:
+        if (
+            anomaly >= 0.5
+            or abs(chg) >= 10
+            or vol > 50_000_000
+            or range_pos <= 0.15
+            or range_pos >= 0.85
+        ):
+            return "image"
+
+    return "short"
+
+
 def insufficient_insight(token, scores=None) -> "str | None":
     """Quality-over-quota pre-check, run before any LLM call.
 
