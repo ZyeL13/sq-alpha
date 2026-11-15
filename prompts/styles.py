@@ -1,4 +1,5 @@
 import random
+import threading
 
 # ─────────────────────────────────────────────
 # HOOKS
@@ -523,3 +524,111 @@ def insufficient_insight(token, scores=None) -> "str | None":
         return "no_observation"
 
     return None
+
+
+# ========== OPENING ANGLES — first-line variety ==========
+# Why this exists: Editorial v2 removed forced verbatim hooks, so the
+# model improvises every opening — and improvisation converges on the
+# most probable opener ("$X slipped N%") for every post in a category.
+# The system prompt already forbids repeatedly opening with a price
+# move, but a prohibition without a mechanism does not change the
+# model's default. These angles supply the mechanism: each post gets
+# ONE angle, drawn from a rotating deck, as an instruction — never
+# verbatim text. The model still writes the words; the angle only
+# decides HOW the post opens. Every angle is data-anchored (it points
+# at a relationship inside the DATA block) and contains none of the
+# EDITORIAL_FORBIDDEN phrases. Direction-agnostic on purpose: the
+# angle describes a way of opening, not what the move was, so the
+# same pool serves gainers, losers, flat tapes and anomalies.
+# =========================================================
+
+OPENING_ANGLES = {
+    "contrast": (
+        "Open with a contrast inside the data: the move vs the volume, "
+        "the move vs the 24h range, or the move vs the news. Lead with "
+        "whichever pair disagrees most."
+    ),
+    "question": (
+        "Open with the one question the data raises — the thing a "
+        "reader would want answered before anything else. Pose the "
+        "question first; do not answer it in the first line."
+    ),
+    "cold_number": (
+        "Open with the single most surprising number in the data, "
+        "stated bare, then explain in the next sentence why it is "
+        "surprising."
+    ),
+    "range_position": (
+        "Open with where the token sits in its 24h range, then reveal "
+        "how it got there."
+    ),
+    "aftermath": (
+        "Open with what happened AFTER the move: did it hold, fade, "
+        "or reverse? The aftermath is the hook, not the move itself."
+    ),
+    "participation": (
+        "Open with who showed up: was this broad participation or a "
+        "thin, calm push? Lead with the participation read, then the move."
+    ),
+    "understatement": (
+        "Open by understating the session, then let the actual number "
+        "land in the second sentence."
+    ),
+    "normal_day": (
+        "Open by comparing this session to a normal session for this "
+        "token: is this an unusual day, or an ordinary day with an "
+        "unusual number attached?"
+    ),
+    "absurdity": (
+        "Open with the dry absurdity the data supports: motion that "
+        "went nowhere, a big number attached to a small move, or heavy "
+        "volume on a flat tape."
+    ),
+    "absence": (
+        "Open with the second-order observation: what did NOT happen — "
+        "no bounce, no volume spike, no follow-through — and why the "
+        "absence is the interesting part."
+    ),
+}
+
+# Rotating deck: every angle is used once per cycle before any
+# repeats, so consecutive posts never open the same way. The deck is
+# module state shared by all processor workers (guarded by a lock);
+# it is in-memory only, so a restart reshuffles — the only cost is
+# variety across the restart boundary, which is harmless.
+_angle_deck: "list[str]" = []
+_angle_lock = threading.Lock()
+_last_angle: "str | None" = None
+
+
+def _refill_deck(rng: "random.Random | None" = None) -> None:
+    """Shuffle a fresh deck. The first card drawn (deck pops from the
+    end) is never the angle drawn last, so no two adjacent posts —
+    even across a cycle boundary — share an opening angle."""
+    global _angle_deck
+    names = list(OPENING_ANGLES)
+    (rng or random).shuffle(names)
+    if _last_angle is not None and len(names) > 1 and names[-1] == _last_angle:
+        names[-1], names[0] = names[0], names[-1]
+    _angle_deck = names
+
+
+def next_opening_angle() -> "tuple[str, str]":
+    """Draw the next (name, instruction) from the rotating deck."""
+    global _last_angle
+    with _angle_lock:
+        if not _angle_deck:
+            _refill_deck()
+        name = _angle_deck.pop()
+        _last_angle = name
+    return name, OPENING_ANGLES[name]
+
+
+def reset_opening_deck(seed: "int | None" = None) -> None:
+    """Empty the deck. Tests pass a seed for a deterministic order."""
+    global _angle_deck, _last_angle
+    with _angle_lock:
+        _angle_deck = []
+        _last_angle = None
+        if seed is not None:
+            _refill_deck(random.Random(seed))

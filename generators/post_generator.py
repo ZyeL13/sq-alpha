@@ -7,6 +7,7 @@ from prompts.styles import (
     VOICE_CALIBRATION,
     generate_data_anchor,
     insufficient_insight,
+    next_opening_angle,
     select_editorial_style,
 )
 from config import LONGFORM_MAX_TOKENS
@@ -94,7 +95,8 @@ def _data_section(token: Dict[str, Any]) -> str:
     return data_section
 
 
-def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] | None = None) -> str:
+def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] | None = None,
+                 opening_angle: "tuple[str, str] | None" = None) -> str:
     """Build the user prompt for one post.
 
     Editorial v2: the style is selected from the token's own data
@@ -103,15 +105,28 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
     verbatim — no hook first line, no angle paragraph, no closing line.
     The old build_prompt forced all three, which is exactly the
     identical-structure template Editorial v2 removes.
+
+    The opening angle is the one exception to "nothing forced": it is
+    an instruction (never verbatim text) drawn from a rotating deck,
+    so consecutive posts open differently instead of converging on
+    the model's default price-move opener. Callers may pass an
+    explicit (name, instruction) pair; otherwise one is drawn here.
     """
     symbol = token["symbol"]
     data_section = _data_section(token)
 
     style = select_editorial_style(token, scores)
+    _, angle_text = opening_angle or next_opening_angle()
 
     prompt = f"""You are writing a short market observation post for Binance Square.
 
 GOAL: Make the reader curious enough to check ${symbol}'s chart.
+
+OPENING ANGLE: {angle_text}
+The first line decides whether the reader stops scrolling. Follow the
+angle above — do NOT open with a plain price-move sentence. The first
+line still carries ${symbol} exactly once: weave the cashtag into the
+angle, do not bolt a price sentence in front of it.
 
 DATA:
 {data_section}
@@ -282,9 +297,13 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
         audit_logger.info(f"SKIPPED|{token['symbol']}|{category}|{skip_reason}")
         return None
 
-    prompt = build_prompt(token, category, scores)
+    # Draw the opening angle here (not inside build_prompt) so the
+    # audit log can record which angle each published post used.
+    angle_name, angle_text = next_opening_angle()
+    prompt = build_prompt(token, category, scores,
+                          opening_angle=(angle_name, angle_text))
     content = generate(prompt, system_prompt=REBATE_SYSTEM, category=category)
-    
+
     if not content or not isinstance(content, str):
         # AUDIT LOG: Gagal generate dari LLM
         audit_logger.warning(f"GENERATE_FAILED|{token['symbol']}|{category}|no_content")
@@ -330,6 +349,6 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
     add_to_recent(content)
 
     # AUDIT LOG: Post berhasil di-generate
-    audit_logger.info(f"GENERATED|{symbol}|{category}|{len(content)}_chars")
+    audit_logger.info(f"GENERATED|{symbol}|{category}|{len(content)}_chars|angle={angle_name}")
 
     return content
