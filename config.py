@@ -170,7 +170,13 @@ POST_MODE = "rebate"
 # ========== PIPELINE SETTINGS ==========
 COLLECTOR_INTERVAL = 60      # seconds between fetches
 PROCESSOR_WORKERS = 1        # number of processor threads
-DAILY_POST_LIMIT = 10        # operator target: max 10/day (Binance API ceiling is 100)
+# Operator target: max 10/day (Binance API ceiling is 100). Tunable via
+# .env (DAILY_POST_LIMIT=25) for temporary tests; a non-numeric value
+# falls back to the default instead of crashing the import.
+try:
+    DAILY_POST_LIMIT = int(os.getenv("DAILY_POST_LIMIT", "10"))
+except ValueError:
+    DAILY_POST_LIMIT = 10
 
 # ========== DEDUPLICATION ==========
 DEDUP_TTL_HOURS = 12         # hours before token can repeat in same category
