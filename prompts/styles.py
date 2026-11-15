@@ -229,7 +229,7 @@ def get_transition(probability: float = 0.2) -> str:
         return ""
     return random.choice(TRANSITIONS)
 
-from config import CLOSER_ENABLED
+from config import CLOSER_ENABLED, OPENING_ANGLE_FILE
 def get_closer(probability: float = 0.3) -> str:
     if not CLOSER_ENABLED:
         return ""
@@ -693,22 +693,86 @@ OPENING_ANGLES = {
     ),
 }
 
-# Rotating deck: every angle is used once per cycle before any
-# repeats, so consecutive posts never open the same way. The deck is
-# module state shared by all processor workers (guarded by a lock);
-# it is in-memory only, so a restart reshuffles — the only cost is
-# variety across the restart boundary, which is harmless.
+# Rotating deck, persistent per posting day: an angle used today is
+# never drawn again until the 07:00 WIB reset (same reset window as
+# the post counter). Used angles live in a small JSON file in cache/
+# (a Docker volume), so the exclusion survives restarts — the
+# in-memory deck is only the remainder of the current cycle. When
+# all 10 angles are used before the reset (possible above 10
+# posts/day), the used list clears and a fresh cycle starts: repeats
+# are allowed only after every angle has had its turn. All file
+# access is best-effort — a missing/corrupt/unwritable state file
+# degrades to the in-memory deck, never a crash.
 _angle_deck: "list[str]" = []
 _angle_lock = threading.Lock()
 _last_angle: "str | None" = None
+# Tests point this at a tmp file; production uses the config path.
+ANGLE_STATE_FILE: str = OPENING_ANGLE_FILE
+
+
+def _today_key() -> str:
+    """Reset-window key for the current posting day. Same 07:00 WIB
+    window as storage/post_counter.py (RESET_HOUR stays the single
+    source of truth there); the computation is duplicated here so
+    prompts/ never imports storage/."""
+    from datetime import datetime, timedelta
+
+    from storage.post_counter import RESET_HOUR
+
+    from config import WIB
+
+    now = datetime.now(WIB)
+    reset = datetime(now.year, now.month, now.day, RESET_HOUR, 0, 0, tzinfo=WIB)
+    if now < reset:
+        reset -= timedelta(days=1)
+    return reset.strftime("%Y-%m-%d_%H:%M")
+
+
+def _read_used() -> "list[str]":
+    """Angles already used today, from the state file. Empty on any
+    failure or when the stored day is not today."""
+    import json
+    import os
+
+    try:
+        if not os.path.exists(ANGLE_STATE_FILE):
+            return []
+        with open(ANGLE_STATE_FILE, "r") as f:
+            data = json.load(f)
+        if data.get("reset_key") != _today_key():
+            return []
+        used = data.get("used", [])
+        return [u for u in used if u in OPENING_ANGLES]
+    except Exception:
+        return []
+
+
+def _write_used(used: "list[str]") -> None:
+    """Persist the used list for today. Best-effort; callers hold
+    _angle_lock."""
+    import json
+    import os
+
+    try:
+        os.makedirs(os.path.dirname(ANGLE_STATE_FILE), exist_ok=True)
+        with open(ANGLE_STATE_FILE, "w") as f:
+            json.dump({"reset_key": _today_key(), "used": used}, f)
+    except Exception:
+        pass
 
 
 def _refill_deck(rng: "random.Random | None" = None) -> None:
-    """Shuffle a fresh deck. The first card drawn (deck pops from the
-    end) is never the angle drawn last, so no two adjacent posts —
-    even across a cycle boundary — share an opening angle."""
+    """Shuffle a fresh deck from the angles not yet used today. The
+    first card drawn (deck pops from the end) is never the angle
+    drawn last, so no two adjacent posts — even across a cycle
+    boundary — share an opening angle. Callers hold _angle_lock."""
     global _angle_deck
-    names = list(OPENING_ANGLES)
+    used = _read_used()
+    names = [n for n in OPENING_ANGLES if n not in used]
+    if not names:
+        # Every angle used today: fresh cycle, used list restarts.
+        _write_used([])
+        names = list(OPENING_ANGLES)
     (rng or random).shuffle(names)
     if _last_angle is not None and len(names) > 1 and names[-1] == _last_angle:
         names[-1], names[0] = names[0], names[-1]
@@ -716,21 +780,29 @@ def _refill_deck(rng: "random.Random | None" = None) -> None:
 
 
 def next_opening_angle() -> "tuple[str, str]":
-    """Draw the next (name, instruction) from the rotating deck."""
+    """Draw the next (name, instruction) from the rotating deck,
+    recording it as used today."""
     global _last_angle
     with _angle_lock:
         if not _angle_deck:
             _refill_deck()
         name = _angle_deck.pop()
         _last_angle = name
+        used = _read_used()
+        if name not in used:
+            used.append(name)
+            _write_used(used)
     return name, OPENING_ANGLES[name]
 
 
-def reset_opening_deck(seed: "int | None" = None) -> None:
-    """Empty the deck. Tests pass a seed for a deterministic order."""
+def reset_opening_deck(seed: "int | None" = None, clear_file: bool = True) -> None:
+    """Empty the deck. Tests pass a seed for a deterministic order.
+    clear_file=False keeps the state file (simulates a restart)."""
     global _angle_deck, _last_angle
     with _angle_lock:
         _angle_deck = []
         _last_angle = None
+        if clear_file:
+            _write_used([])
         if seed is not None:
             _refill_deck(random.Random(seed))
