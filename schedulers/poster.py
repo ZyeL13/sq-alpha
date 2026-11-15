@@ -78,24 +78,24 @@ def post_to_telegram(text, category):
     label = label_map.get(category, category)
     full = f"✍️ *yè writing... - {label}*\n\n{text}"
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    
-    for attempt in range(2):
-        try:
-            r = requests.post(url, json={
-                "chat_id": TELEGRAM_CHAT_ID, 
-                "text": full, 
-                "parse_mode": "Markdown"
-            }, timeout=15)
-            
-            if r.status_code == 200:
-                return True
-            else:
-                print(f"  ⚠️ Telegram attempt {attempt+1}: HTTP {r.status_code}")
-                time.sleep(2)
-        except Exception as e:
-            print(f"  ⚠️ Telegram attempt {attempt+1}: {e}")
-            time.sleep(2)
-    
+
+    # Single attempt only (best-effort, "optional, not counted"):
+    # retrying after a timeout can duplicate a message that was
+    # actually delivered, which is worse than one missed notification.
+    try:
+        r = requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": full,
+            "parse_mode": "Markdown"
+        }, timeout=15)
+
+        if r.status_code == 200:
+            return True
+        else:
+            print(f"  ⚠️ Telegram: HTTP {r.status_code}")
+    except Exception as e:
+        print(f"  ⚠️ Telegram: {e}")
+
     return False
 
 
