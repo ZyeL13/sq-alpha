@@ -228,6 +228,20 @@ class ScheduledPostQueue:
             count = cursor.fetchone()[0]
             conn.close()
             return count
+
+    def get_recent_scheduled_posts(self, limit: int = 5) -> List[str]:
+        """Post texts of the most recently scheduled posts, newest
+        first. Read-only; feeds the draft pool's opener-freshness
+        check (spec 5.2)."""
+        with self._lock:
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            cursor = conn.execute(
+                "SELECT post FROM scheduled_posts "
+                "ORDER BY scheduled_time DESC LIMIT ?",
+                (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [row[0] for row in rows]
     
     def clear(self):
         """Clear all scheduled posts"""

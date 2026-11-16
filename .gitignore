@@ -53,3 +53,9 @@ backup_cache/
 
 # Performance logs
 logs/post_performance.jsonl
+
+# Reaction illustrations: delivered as a zip at deploy time, never committed
+# (the snapshot push rejects binaries). README.md in that dir IS tracked.
+assets/illustrations/*.jpg
+assets/illustrations/*.jpeg
+assets/illustrations/*.png

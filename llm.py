@@ -20,6 +20,29 @@ _request_history = defaultdict(list)
 # (dead model ID). In-memory only — cleared on restart.
 _DISABLED_PROVIDERS = set()
 
+# Last time each provider answered HTTP 429 (or the local per-minute
+# throttle blocked it). The JIT pool reads this to distinguish a
+# rate-limit failure from an ordinary generation failure: on a 429
+# the pool stops drafting and picks a winner from the drafts already
+# completed, instead of hammering the provider pool_size times.
+# In-memory only; timestamps, so stale hits never mislead a later call.
+_RATE_LIMIT_HITS = {}
+
+
+def mark_rate_limited(provider_name: str) -> None:
+    """Record a rate-limit hit for a provider, right now."""
+    _RATE_LIMIT_HITS[provider_name] = time.time()
+
+
+def was_rate_limited_since(t0: float) -> bool:
+    """True when any provider was rate-limited at or after t0.
+
+    The pool records t0 just before a draft call and checks right
+    after a failed draft: only hits inside that window count, so a
+    429 from an earlier, unrelated call never triggers an early-exit.
+    """
+    return any(hit >= t0 for hit in _RATE_LIMIT_HITS.values())
+
 
 def _can_send(provider_name: str) -> bool:
     """Check if provider is within rate limit"""
@@ -74,6 +97,10 @@ def _call_provider(provider: str, user_prompt: str, system_prompt: str,
 
     # Check rate limit
     if not _can_send(provider):
+        if cfg.get("enabled", True):
+            # Local per-minute throttle: a rate-limit signal, like a
+            # server 429 — the JIT pool treats it as one.
+            mark_rate_limited(provider)
         return None, f"Rate limit exceeded for {provider}"
     
     headers = {
@@ -168,6 +195,7 @@ def _call_provider(provider: str, user_prompt: str, system_prompt: str,
         
             elif response.status_code == 429:
                 # Rate limit - wait longer
+                mark_rate_limited(provider)
                 wait_time = min(60, (attempt ** 2) * 5)  # 5, 20, 45, max 60
                 print(f"  ⚠️ Rate limit (429), waiting {wait_time}s before retry...")
                 time.sleep(wait_time)

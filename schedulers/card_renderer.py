@@ -257,7 +257,7 @@ def _render_plain_image(token: dict, price: float, change: float,
 
 def render_card(token: dict, output_dir: str | None = None,
                 *, snapshot=None, card_type=None, question=None,
-                style=None) -> str:
+                style=None, reaction=None) -> str:
     """Render the card for one token. Returns the PNG path.
 
     Raises CardRenderError on any failure. Rendering is a pure
@@ -267,7 +267,10 @@ def render_card(token: dict, output_dir: str | None = None,
 
     `snapshot` + `card_type` select the sketchnote style's data;
     `question` is the post's closing question, repeated on the
-    card (omitted when None). When the resolved style is sketchnote
+    card (omitted when None). `reaction` is the winning draft's
+    opening reaction: on a sketchnote card it pastes the reaction
+    illustration in the margin zone and gates the main polaroid
+    off; the plain style ignores it. When the resolved style is sketchnote
     but no snapshot/card_type is given, the render degrades to the
     plain style instead of failing — the snapshot-missing fallback
     to text-only lives in prepare_post, where slot accounting
@@ -305,7 +308,8 @@ def render_card(token: dict, output_dir: str | None = None,
 
     try:
         if resolved == "sketchnote":
-            card_data = build_card_data(snapshot, card_type, question)
+            card_data = build_card_data(snapshot, card_type, question,
+                                        reaction)
             img = render_sketchnote_image(card_data)
         else:
             img = _render_plain_image(token, price, change, volume)
