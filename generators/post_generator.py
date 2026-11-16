@@ -120,7 +120,9 @@ def _data_section(token: Dict[str, Any]) -> str:
 
 def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] | None = None,
                  opening_angle: "tuple[str, str] | None" = None,
-                 closing_question: bool = False) -> str:
+                 closing_question: bool = False,
+                 reaction: "tuple[str, str] | None" = None,
+                 memory: "str | None" = None) -> str:
     """Build the user prompt for one post.
 
     Editorial v2: the style is selected from the token's own data
@@ -136,16 +138,52 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
     the model's default price-move opener. Callers may pass an
     explicit (name, instruction) pair; otherwise one is drawn here.
 
+    On the JIT path the angle is replaced by a REACTION (see
+    prompts/reactions.py): the same instruction-block mechanism, but
+    the opener is a human reaction to the data shape, and first
+    person is allowed in the opening line only. When a reaction is
+    passed, no angle is drawn and the person rule is relaxed for the
+    opener line alone; the rest of the prompt is identical.
+
     closing_question=True is the second, deliberate exception —
     image posts only: the post must end with a closing question,
     which the card then repeats verbatim (see extract_closing_
     question). Text posts keep the no-forced-question rule.
+
+    memory is a pre-formatted MEMORY block (see
+    storage/memory_store.format_memory_block) describing the last
+    post about this token, or None. It is appended to the DATA
+    section so reactions may draw on it; it is never required.
     """
     symbol = token["symbol"]
     data_section = _data_section(token)
+    if memory:
+        data_section += f"\nMEMORY: {memory}"
 
     style = select_editorial_style(token, scores)
-    _, angle_text = opening_angle or next_opening_angle()
+    if reaction is not None:
+        _, reaction_text = reaction
+        opening_block = (
+            f"OPENING REACTION: {reaction_text}\n"
+            "The first line decides whether the reader stops scrolling. Follow the\n"
+            "reaction above — react to the data the way a person following this\n"
+            "token would, do NOT open with a plain price-move sentence. The first\n"
+            f"line still carries ${symbol} exactly once: weave the cashtag into the\n"
+            "reaction, do not bolt a price sentence in front of it."
+        )
+        person_rule = ("- First person (\"I\") is allowed ONLY in the opening line, as part "
+                       "of the reaction. No \"we\", no \"you\" anywhere; the rest of "
+                       "the post stays third-person.")
+    else:
+        _, angle_text = opening_angle or next_opening_angle()
+        opening_block = (
+            f"OPENING ANGLE: {angle_text}\n"
+            "The first line decides whether the reader stops scrolling. Follow the\n"
+            "angle above — do NOT open with a plain price-move sentence. The first\n"
+            f"line still carries ${symbol} exactly once: weave the cashtag into the\n"
+            "angle, do not bolt a price sentence in front of it."
+        )
+        person_rule = "- No first or second person: no \"i\", \"we\", \"you\"."
     if closing_question:
         ending_rule = ("- End the post with a closing question: the question "
                        "the observation raises. It must be the last sentence "
@@ -158,11 +196,7 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
 
 GOAL: Make the reader curious enough to check ${symbol}'s chart.
 
-OPENING ANGLE: {angle_text}
-The first line decides whether the reader stops scrolling. Follow the
-angle above — do NOT open with a plain price-move sentence. The first
-line still carries ${symbol} exactly once: weave the cashtag into the
-angle, do not bolt a price sentence in front of it.
+{opening_block}
 
 DATA:
 {data_section}
@@ -191,7 +225,7 @@ RULES:
 - $SYMBOL and all token tickers MUST be uppercase: $XRP not $xrp, $BTC not $btc
 - Volume format: use capital M, $106.0M not $106.0m
 - Refer to the token as ${symbol} (with $ prefix, uppercase) exactly ONCE, in the first line. In every later sentence use "the token" — never repeat the cashtag.
-- No first or second person: no "i", "we", "you".
+{person_rule}
 
 Write the post inside <post> tags. Nothing outside the tags."""
     return prompt
@@ -343,7 +377,9 @@ def extract_closing_question(content: str):
 
 def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float],
                   opening_angle: "tuple[str, str] | None" = None,
-                  closing_question: bool = False) -> Optional[str]:
+                  closing_question: bool = False,
+                  reaction: "tuple[str, str] | None" = None,
+                  memory: "str | None" = None) -> Optional[str]:
     # Quality over quota: skip before any LLM call when there is
     # genuinely nothing to observe. The reason is audit-logged so the
     # skip rate can be evaluated (Editorial v2 KPI).
@@ -357,14 +393,23 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
     # audit log can record which angle each published post used.
     # Callers may pass an explicit angle (card-type mapping for
     # image posts); it is recorded as used today, like a draw.
-    if opening_angle is None:
+    # A reaction replaces the angle entirely (JIT path): no angle is
+    # drawn or recorded, and the reaction itself is NOT recorded
+    # here — the pool records only the winning draft's reaction.
+    reaction_name = None
+    if reaction is not None:
+        angle_name = None
+        reaction_name, _ = reaction
+    elif opening_angle is None:
         angle_name, angle_text = next_opening_angle()
+        opening_angle = (angle_name, angle_text)
     else:
         angle_name, angle_text = opening_angle
         record_angle_used(angle_name)
     prompt = build_prompt(token, category, scores,
-                          opening_angle=(angle_name, angle_text),
-                          closing_question=closing_question)
+                          opening_angle=opening_angle,
+                          closing_question=closing_question,
+                          reaction=reaction, memory=memory)
     content = generate(prompt, system_prompt=REBATE_SYSTEM, category=category)
 
     if not content or not isinstance(content, str):
@@ -412,6 +457,9 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
     add_to_recent(content)
 
     # AUDIT LOG: Post berhasil di-generate
-    audit_logger.info(f"GENERATED|{symbol}|{category}|{len(content)}_chars|angle={angle_name}")
+    if reaction_name is not None:
+        audit_logger.info(f"GENERATED|{symbol}|{category}|{len(content)}_chars|reaction={reaction_name}")
+    else:
+        audit_logger.info(f"GENERATED|{symbol}|{category}|{len(content)}_chars|angle={angle_name}")
 
     return content

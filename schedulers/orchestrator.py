@@ -2,6 +2,7 @@
 import time
 import random
 import threading
+from dataclasses import dataclass
 from datetime import datetime
 from collections import deque
 
@@ -9,16 +10,20 @@ from collectors.binance import attach_btc_change, fetch_all_binance, fetch_new_l
 from collectors.coingecko import enrich_tokens
 from collectors.coinmarketcap import enrich_tokens_cmc
 from collectors.rss_news import fetch_all_news, get_catalyst_summary, assign_news_to_tokens, find_big_unmatched, suggest_review_cashtag
+from llm import was_rate_limited_since
 from storage.news_dedup import is_news_seen, mark_news_used, clear_old_news_entries
 from storage.news_review import queue_for_review
+from storage.memory_store import format_memory_block, get_memory, record_memory
 from processors.normalize import normalize_token
 from processors.classify import classify
 from processors.score import score_token
 from processors.dedupe import is_duplicate, mark_posted, clear_old_entries
+from processors.draft_scoring import pick_winner, score_draft
 from prompts.styles import card_type_angle, select_card_type, select_post_format
+from prompts.reactions import advance_variant, draw_reaction, record_reaction_used
 from generators.post_generator import extract_closing_question, generate_longform, generate_post
 from schedulers.card_renderer import CardRenderError, render_card
-from schedulers.snapshot import build_snapshot
+from schedulers.snapshot import CardSnapshot, build_snapshot
 from schedulers.poster import post_to_targets
 from storage.format_counter import get_format_counts, increment_format_count
 from config import (
@@ -28,6 +33,9 @@ from config import (
     RSS_ENABLED,
     RSS_REFRESH_INTERVAL,
     RSS_MAX_ARTICLES_PER_SOURCE,
+    JIT_SCHEDULING,
+    DRAFT_POOL_SIZE,
+    SCHEDULE_BUFFER_MAX,
 )
 from schedulers.timing import get_post_delay, get_current_session
 from storage.post_counter import can_post, DAILY_POST_LIMIT, get_today_posts, get_seconds_until_reset
@@ -150,6 +158,16 @@ def collector_worker():
             if check_and_sleep():
                 break
 
+            if JIT_SCHEDULING and \
+                    ScheduledPostQueue().get_post_count() >= SCHEDULE_BUFFER_MAX:
+                # Buffer full: skip the fetch + queueing cycle (the
+                # tokens would sit unread in the PersistentQueue).
+                # Wake every 15 min to refresh the news cache only,
+                # so generation-time news stays fresh.
+                refresh_news_cache()
+                stop_flag.wait(timeout=_COLLECTOR_SLEEP_CAP)
+                continue
+
             refresh_news_cache()
             binance_tokens = fetch_all_binance(limit=200)
             new_listings = fetch_new_listings()
@@ -174,11 +192,15 @@ def collector_worker():
             # Artikel yang sudah pernah dipakai sebagai katalis tidak
             # ditempel lagi (feed RSS menampilkan 5 teratas berjam-jam,
             # jadi tanpa ini berita yang sama menempel tiap siklus).
-            # Artikel ditandai "dipakai" saat ditempel di sini, bukan
-            # saat post terbit: ini menjamin satu event maksimal satu
-            # post. Trade-off yang diterima: kalau token yang mengklaim
-            # lalu gagal di score gate/dedupe, event itu hangus dan
-            # tidak dicoba ke token lain.
+            # Pre-JIT: artikel ditandai "dipakai" saat ditempel di
+            # sini, bukan saat post terbit: ini menjamin satu event
+            # maksimal satu post. Trade-off yang diterima: kalau
+            # token yang mengklaim lalu gagal di score gate/dedupe,
+            # event itu hangus dan tidak dicoba ke token lain.
+            # JIT: penandaan pindah ke schedule time (spec 5.5) —
+            # hanya draft pemenang yang membakar katalisnya; stub
+            # artikel minimal ikut antrean supaya processor bisa
+            # menandai (dan mengecek ulang) saat schedule.
             news_assignment = assign_news_to_tokens(
                 [t.get("symbol", "") for t in binance_tokens], _news_cache)
             # Berita besar yang tidak cocok ke token mana pun masuk
@@ -202,8 +224,16 @@ def collector_worker():
                         # harga/volume saat post di-generate (Langkah 6).
                         token["price_at_news"] = token.get("price", 0)
                         token["volume_at_news"] = token.get("volume_24h", 0)
-                        for article in assigned[:2]:
-                            mark_news_used(article, symbol)
+                        if JIT_SCHEDULING:
+                            token["news_article_keys"] = [
+                                {"link": a.get("link", ""),
+                                 "title": a.get("title", ""),
+                                 "source": a.get("source", "")}
+                                for a in assigned[:2]
+                            ]
+                        else:
+                            for article in assigned[:2]:
+                                mark_news_used(article, symbol)
 
             queued = 0
             for token in binance_tokens:
@@ -223,30 +253,58 @@ def collector_worker():
             time.sleep(30)
 
 
-def prepare_post(token, category, scores):
-    """Decide the format, generate once, render the card if needed.
+@dataclass
+class Draft:
+    """One generated post, pre-render.
+
+    prepare_draft produces it (format decision + one generation, no
+    rendering); finalize_draft renders the winner's card/cover. The
+    pool scores Drafts and finalizes only the winner, so losing
+    drafts never cost a render. `reaction` is the reaction NAME
+    (the instruction text lives in prompts.reactions.REACTIONS);
+    None for long-form articles and for the pre-JIT path.
+    `total_score` is the score gate's weighted total, carried for
+    the pool's signal component (the per-signal `scores` dict does
+    not contain it).
+    """
+
+    content: str
+    fmt: str
+    title: "str | None"
+    token: dict
+    category: str
+    scores: dict
+    total_score: float = 0.0
+    snapshot: "CardSnapshot | None" = None
+    card_type: "str | None" = None
+    reaction: "str | None" = None
+
+
+def prepare_draft(token, category, scores, reaction=None, memory=None,
+                  total_score=0.0):
+    """Decide the format, generate once. No rendering.
 
     The format is decided BEFORE generation (spec section 7: no
-    extra LLM passes — exactly one generation call per post).
-    Returns (content, format, title, image_paths), or None when
-    nothing could be generated. Degradation, never drops:
-    - image + missing snapshot (klines failed) -> scheduled as
-      short text, and no image slot is consumed.
-    - image + no matching card type -> scheduled as short text,
+    extra LLM passes — exactly one generation call per draft).
+    Returns a Draft, or None when nothing could be generated.
+    Degradation, never drops:
+    - image + missing snapshot (klines failed) -> short text draft,
       and no image slot is consumed.
-    - image + render failure -> scheduled as short text, and no
+    - image + no matching card type -> short text draft, and no
       image slot is consumed.
-    - longform + render failure -> scheduled as an article without
-      a cover (the poster publishes coverless articles by design).
-      Scheduling a 600-900-word article as "short" would truncate
-      it to 900 chars, so the format is kept.
     - longform + generation failure -> ONE fallback generate_post
       call, audit-logged; the only path with a second LLM call.
+    Render-failure fallbacks live in finalize_draft, which runs
+    only for the scheduled winner.
+
+    `reaction` is a tentative (name, instruction) draw from the
+    pool; it replaces the opening angle (and the card-type angle
+    mapping) for this draft. `memory` is a pre-formatted MEMORY
+    block for the prompt, or None. Both default to the pre-JIT
+    behavior: angle deck / card-type mapping, no memory block.
     """
     fmt = select_post_format(token, category, scores, get_format_counts())
     symbol = token.get("symbol", "?")
-    title = None
-    image_paths = None
     snapshot = None
 
     card_type = None
@@ -261,7 +319,8 @@ def prepare_post(token, category, scores):
             fmt = "short"
         else:
             # The card type is decided BEFORE generation and drives
-            # the text (mapped opening angle + closing question).
+            # the text (mapped opening angle + closing question on
+            # the pre-JIT path; the reaction on the JIT path).
             # No matching type: an ordinary post, slot not consumed.
             card_type = select_card_type(
                 change=token.get("price_change_percent", 0) or 0,
@@ -274,31 +333,33 @@ def prepare_post(token, category, scores):
                 audit_logger.info(f"IMAGE_FALLBACK|{symbol}|no_card_type")
                 fmt = "short"
 
+    reaction_name = reaction[0] if reaction else None
+
     if fmt == "longform":
         result = generate_longform(token, category, scores)
         if result is None:
             print(f"  ⚠️ Long-form failed for ${symbol}, falling back to short text")
             audit_logger.info(f"LONGFORM_FALLBACK|{symbol}|{category}|generate_failed")
             fmt = "short"
-            content = generate_post(token, category, scores)
+            content = generate_post(token, category, scores,
+                                    reaction=reaction, memory=memory)
             if content is None:
                 return None
-            return content, fmt, None, None
+            return Draft(content=content, fmt=fmt, title=None, token=token,
+                         category=category, scores=scores,
+                         total_score=total_score, reaction=reaction_name)
         title, content = result
-        try:
-            # Long-form covers keep the plain style: no snapshot is
-            # built on this path, and the cover contract is unchanged.
-            image_paths = [render_card(token, style="plain")]
-        except CardRenderError as e:
-            print(f"  ⚠️ Cover render failed for ${symbol} ({e}), publishing without cover")
-            audit_logger.info(f"IMAGE_FALLBACK|{symbol}|cover_render_failed")
-            image_paths = None
-        return content, fmt, title, image_paths
+        # Long-form articles carry no opener reaction; the tentative
+        # draw (if any) is discarded with the draft's reaction slot.
+        return Draft(content=content, fmt=fmt, title=title, token=token,
+                     category=category, scores=scores,
+                     total_score=total_score)
 
     # Image posts generate from the snapshot-enriched token copy so
     # the prompt carries the same derived numbers the card shows,
     # with the card type's mapped opening angle and a closing
-    # question the card repeats. Exactly one LLM call, as always.
+    # question the card repeats — or the pool's reaction on the JIT
+    # path. Exactly one LLM call, as always.
     gen_token = token
     opening_angle = None
     closing_question = False
@@ -307,25 +368,329 @@ def prepare_post(token, category, scores):
         gen_token["volume_7d_avg"] = snapshot.volume_7d_avg
         gen_token["volume_ratio_7d"] = snapshot.volume_ratio
         gen_token["btc_change_24h"] = snapshot.btc_change
-        opening_angle = card_type_angle(card_type)
+        if reaction is None:
+            opening_angle = card_type_angle(card_type)
         closing_question = True
 
     content = generate_post(gen_token, category, scores,
                             opening_angle=opening_angle,
-                            closing_question=closing_question)
+                            closing_question=closing_question,
+                            reaction=reaction, memory=memory)
     if content is None:
         return None
+    return Draft(content=content, fmt=fmt, title=None, token=token,
+                 category=category, scores=scores, total_score=total_score,
+                 snapshot=snapshot, card_type=card_type,
+                 reaction=reaction_name)
+
+
+def finalize_draft(draft):
+    """Render the winner's card/cover. Returns the
+    (content, format, title, image_paths) tuple prepare_post has
+    always returned. Render-failure fallbacks (unchanged):
+    - image + render failure -> scheduled as short text, and no
+      image slot is consumed.
+    - longform + render failure -> scheduled as an article without
+      a cover (the poster publishes coverless articles by design).
+      Scheduling a 600-900-word article as "short" would truncate
+      it to 900 chars, so the format is kept.
+    """
+    content, fmt, title = draft.content, draft.fmt, draft.title
+    symbol = draft.token.get("symbol", "?")
+    image_paths = None
     if fmt == "image":
         try:
             image_paths = [render_card(
-                token, snapshot=snapshot, card_type=card_type,
-                question=extract_closing_question(content))]
+                draft.token, snapshot=draft.snapshot,
+                card_type=draft.card_type,
+                question=extract_closing_question(content),
+                reaction=draft.reaction)]
         except CardRenderError as e:
             print(f"  ⚠️ Card render failed for ${symbol} ({e}), falling back to short text")
             audit_logger.info(f"IMAGE_FALLBACK|{symbol}|render_failed")
             fmt = "short"
             image_paths = None
+    elif fmt == "longform":
+        try:
+            # Long-form covers keep the plain style: no snapshot is
+            # built on this path, and the cover contract is unchanged.
+            image_paths = [render_card(draft.token, style="plain")]
+        except CardRenderError as e:
+            print(f"  ⚠️ Cover render failed for ${symbol} ({e}), publishing without cover")
+            audit_logger.info(f"IMAGE_FALLBACK|{symbol}|cover_render_failed")
+            image_paths = None
     return content, fmt, title, image_paths
+
+
+def prepare_post(token, category, scores, reaction=None, memory=None,
+                 total_score=0.0):
+    """Thin wrapper: draft + finalize. Existing call sites keep
+    working unchanged; the pool path calls the two phases
+    separately so only the winner is rendered."""
+    draft = prepare_draft(token, category, scores, reaction=reaction,
+                          memory=memory, total_score=total_score)
+    if draft is None:
+        return None
+    return finalize_draft(draft)
+
+
+# ---------------- JIT pool ----------------
+# One pool round at a time, even if PROCESSOR_WORKERS ever grows
+# past 1: rounds share the reaction deck, the variant cursors, and
+# the scheduled queue.
+_pool_lock = threading.Lock()
+
+# Buffer-full sleep caps (spec 4.2): the processor wakes when the
+# next post fires (+30s) or after 30 min; the collector wakes every
+# 15 min to refresh the news cache only. An empty pool round backs
+# off 60s so a dry queue or a throttled provider doesn't hot-loop.
+_PROCESSOR_SLEEP_CAP = 1800
+_COLLECTOR_SLEEP_CAP = 900
+_POOL_EMPTY_BACKOFF = 60
+
+
+def _chain_time(last_time, current_time, delay):
+    """Chain a new post after the last scheduled one; fall back to
+    now + delay when the queue is empty (last_time None) or the last
+    post is already due. None-safe by construction."""
+    if last_time and last_time > current_time:
+        return last_time + delay
+    return current_time + delay
+
+
+def _sleep_until_next_post(scheduled_queue, cap_seconds):
+    """Sleep until the earliest scheduled post fires (+30s), capped.
+    Interruptible via stop_flag. A 1s sleep when the queue is empty
+    (defensive: callers checked the buffer is full first)."""
+    next_time = scheduled_queue.get_next_post_time()
+    if next_time is None:
+        wait = 1.0
+    else:
+        wait = max(1.0, next_time - time.time() + 30)
+    wait = min(wait, cap_seconds)
+    print(f"  💤 Buffer full, sleeping {wait:.0f}s until the next slot...")
+    stop_flag.wait(timeout=wait)
+
+
+def _strip_stale_catalyst(token):
+    """Drop a catalyst whose article another post already used (the
+    article was attached before that post scheduled). The token
+    competes on signal alone; nothing is marked."""
+    for key in ("news_catalyst", "price_at_news", "volume_at_news",
+                "news_article_keys"):
+        token.pop(key, None)
+
+
+def _collect_candidates(worker_id, pool_size):
+    """Pull + classify + gate tokens until pool_size candidates or
+    the queue is exhausted this cycle (a get() timeout ends the
+    collection). Consumed items are gone whether or not they pass
+    the gates — same as the pre-JIT processor. Returns a list of
+    (token, category, scored, hook)."""
+    from prompts.styles import get_hook
+
+    candidates = []
+    while len(candidates) < pool_size:
+        item = data_queue.get(timeout=5)
+        if item is None:
+            break
+        source, raw = item
+        token = normalize_token(raw, source=source)
+        cat = classify(token)
+        if not cat:
+            continue
+        scored = score_token(token, cat)
+        if not scored["passes"]:
+            print(f"  🚫 P{worker_id}: {token['symbol']} → {cat} "
+                  f"(score too low: total={scored['total']:.2f}, "
+                  f"primary={scored['primary']:.2f})")
+            audit_logger.info(
+                f"SCORE_REJECTED|{token['symbol']}|{cat}|"
+                f"total={scored['total']:.2f}|primary={scored['primary']:.2f}")
+            continue
+        hook = get_hook(cat) or "default"
+        market_cap = token.get("market_cap", 0)
+        if is_duplicate(token["symbol"], cat, market_cap, hook):
+            continue
+        # normalize_token drops these fields, so carry them from the
+        # raw queue item like the pre-JIT processor does.
+        for key in ("news_catalyst", "price_at_news", "volume_at_news",
+                    "btc_change_24h", "news_article_keys"):
+            if key in raw:
+                token[key] = raw[key]
+        # Catalyst re-check: the article may have been used by a
+        # post scheduled after this token was queued (schedule-time
+        # marking, spec 5.5). A stale catalyst is stripped, never
+        # re-marked.
+        stubs = token.get("news_article_keys") or []
+        if stubs and any(is_news_seen(s) for s in stubs
+                         if isinstance(s, dict)):
+            _strip_stale_catalyst(token)
+        candidates.append((token, cat, scored, hook))
+    return candidates
+
+
+def _schedule_winner(worker_id, draft, hook, scheduled_queue):
+    """Finalize + schedule the pool winner: render, chain the time,
+    record every commitment (format cap, dedupe, memory, reaction,
+    variant, news). Mirrors the pre-JIT schedule step so queue rows
+    stay identical. Returns True."""
+    content, fmt, title, image_paths = finalize_draft(draft)
+    token = draft.token
+    symbol = token["symbol"]
+    current_time = time.time()
+    delay = get_post_delay()
+    scheduled_time = _chain_time(scheduled_queue.get_last_post_time(),
+                                 current_time, delay)
+    session = get_current_session()
+    scheduled_queue.add_post(
+        post=content,
+        category=draft.category,
+        symbol=symbol,
+        scheduled_time=scheduled_time,
+        hook=hook,
+        session=session,
+        provider="blockrun",
+        format=fmt,
+        title=title,
+        image_paths=image_paths,
+    )
+    # Scheduling is the commitment point for the per-format daily
+    # caps, the dedupe record, the post memory, the reaction deck,
+    # the variant rotation, and the news catalyst: losers record
+    # none of these.
+    if fmt in ("image", "longform"):
+        increment_format_count(fmt)
+    mark_posted(symbol, draft.category, hook, token.get("market_cap", 0))
+    record_memory(symbol, token.get("price_change_percent", 0), content)
+    if draft.reaction:
+        record_reaction_used(draft.reaction)
+        advance_variant(draft.reaction)
+    for stub in token.get("news_article_keys") or []:
+        if isinstance(stub, dict):
+            mark_news_used(stub, symbol)
+    wait_min = (scheduled_time - current_time) / 60
+    print(f"  ✍️ P{worker_id}: {symbol} → {draft.category} [{fmt}] "
+          f"scheduled in {wait_min:.1f} min")
+    audit_logger.info(
+        f"SCHEDULED|{symbol}|{draft.category}|{hook}|{session}|"
+        f"{int(scheduled_time)}|{fmt}")
+    logger.info(f"POST_SCHEDULED: {symbol} -> {draft.category} [{fmt}] "
+                f"scheduled in {wait_min:.1f} min")
+    return True
+
+
+def run_pool_round(worker_id, scheduled_queue=None):
+    """One JIT pool round: collect -> draft -> score -> schedule the
+    winner. Returns True when a post was scheduled. Serialized by
+    _pool_lock: at most one round runs at a time.
+
+    Rate-limit early-exit: when a draft call hits a 429, the loop
+    stops immediately and the winner is picked from the drafts
+    already completed; with zero drafts the round ends empty
+    (POOL_EMPTY|rate_limited). DRAFT_POOL_SIZE=1 skips scoring and
+    finalizes the single draft directly.
+    """
+    with _pool_lock:
+        queue = scheduled_queue or ScheduledPostQueue()
+        if not can_post():
+            return False
+        if queue.get_post_count() >= SCHEDULE_BUFFER_MAX:
+            return False
+        pool_size = DRAFT_POOL_SIZE
+        candidates = _collect_candidates(worker_id, pool_size)
+        if not candidates:
+            print(f"  📭 P{worker_id}: pool round, no candidates")
+            audit_logger.info("POOL_EMPTY|no_candidates")
+            return False
+        drafts = []
+        rate_limited = False
+        for token, cat, scored, hook in candidates:
+            memory_rec = get_memory(token["symbol"])
+            reaction = draw_reaction(token, memory_rec)
+            memory_block = format_memory_block(
+                memory_rec, token["symbol"],
+                token.get("price_change_percent", 0))
+            t0 = time.time()
+            draft = prepare_draft(token, cat, scored["scores"],
+                                  reaction=reaction,
+                                  memory=memory_block or None,
+                                  total_score=scored["total"])
+            if draft is None:
+                if was_rate_limited_since(t0):
+                    rate_limited = True
+                    print(f"  ⚠️ P{worker_id}: rate limit hit, "
+                          "stopping the round early")
+                    audit_logger.info("POOL_429|early_exit|"
+                                      f"{len(drafts)}_drafts_done")
+                    break
+                continue
+            drafts.append((draft, hook))
+        if not drafts:
+            reason = "rate_limited" if rate_limited else "all_drafts_failed"
+            print(f"  📭 P{worker_id}: pool round empty ({reason})")
+            audit_logger.info(f"POOL_EMPTY|{reason}")
+            return False
+        if pool_size == 1:
+            # Single-draft pool: skip scoring, finalize directly.
+            winner, winner_hook = drafts[0]
+        else:
+            recent = queue.get_recent_scheduled_posts(5)
+            scored_drafts = []
+            for draft, hook in drafts:
+                result = score_draft(draft.content, draft.token,
+                                     draft.total_score, recent,
+                                     draft.snapshot)
+                if result is None:
+                    audit_logger.info(
+                        f"DRAFT_REJECTED|{draft.token['symbol']}|"
+                        f"{draft.reaction or '-'}|validate_failed")
+                    continue
+                audit_logger.info(
+                    f"DRAFT_SCORED|{draft.token['symbol']}|"
+                    f"{draft.reaction or '-'}|{result.total:.1f}|"
+                    f"{result.components_str()}")
+                scored_drafts.append((draft, hook, result))
+            if not scored_drafts:
+                print(f"  📭 P{worker_id}: pool round empty (all_rejected)")
+                audit_logger.info("POOL_EMPTY|all_rejected")
+                return False
+            winner, winner_hook, _ = scored_drafts[pick_winner(
+                [s for _, _, s in scored_drafts])]
+        print(f"  🏆 P{worker_id}: pool winner ${winner.token['symbol']} "
+              f"({len(drafts)}/{len(candidates)} drafts)")
+        return _schedule_winner(worker_id, winner, winner_hook, queue)
+
+
+def processor_worker_jit(worker_id: int):
+    """JIT processor: pool rounds while a buffer slot is open, sleep
+    while the buffer is full. The daily-limit sleep is the shared
+    check_and_sleep (until the 07:00 WIB reset)."""
+    print(f"  🧠 Processor {worker_id} started (JIT pool)")
+    scheduled_queue = ScheduledPostQueue()
+    while not stop_flag.is_set():
+        try:
+            if check_and_sleep():
+                break
+            if scheduled_queue.get_post_count() >= SCHEDULE_BUFFER_MAX:
+                _sleep_until_next_post(scheduled_queue, _PROCESSOR_SLEEP_CAP)
+                continue
+            if not run_pool_round(worker_id, scheduled_queue):
+                # Empty round (no candidates, all drafts failed, or
+                # rate-limited): back off so a dry queue or a
+                # throttled provider doesn't hot-loop.
+                stop_flag.wait(timeout=_POOL_EMPTY_BACKOFF)
+                continue
+            time.sleep(random.uniform(2, 5))
+        except Exception as e:
+            print(f"  ❌ P{worker_id} error: {e}")
+            time.sleep(1)
+
+
+def _processor_target():
+    """The processor entry point for this run: JIT pool rounds, or
+    the pre-JIT per-token worker when the kill switch is off."""
+    return processor_worker_jit if JIT_SCHEDULING else processor_worker
 
 
 def processor_worker(worker_id: int):
@@ -548,6 +913,8 @@ def run_orchestrator():
     print("🚀 Starting Pipeline Orchestrator")
     print(f"📅 {datetime.now(WIB).strftime('%Y-%m-%d %H:%M:%S')} WIB")
     print(f"📊 Daily limit: {DAILY_POST_LIMIT} posts/day")
+    print(f"🧠 JIT scheduling: {'ON' if JIT_SCHEDULING else 'OFF'} "
+          f"(pool {DRAFT_POOL_SIZE}, buffer {SCHEDULE_BUFFER_MAX})")
     print(f"📰 News refresh interval: {RSS_REFRESH_INTERVAL}s")
     print(f"{'='*50}\n")
     
@@ -569,9 +936,10 @@ def run_orchestrator():
     
     # Start workers
     threading.Thread(target=collector_worker, daemon=True).start()
-    
+
+    processor_target = _processor_target()
     for i in range(PROCESSOR_WORKERS):
-        threading.Thread(target=processor_worker, args=(i+1,), daemon=True).start()
+        threading.Thread(target=processor_target, args=(i+1,), daemon=True).start()
     
     threading.Thread(target=poster_worker, daemon=True).start()
     

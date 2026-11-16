@@ -299,3 +299,95 @@ def test_generate_specific_provider_only(monkeypatch):
     result = llm.generate("prompt", provider="deepseek", use_cache=False)
     assert result == "$XYZ specific provider post"
     assert tried == ["deepseek"]
+
+
+# --- JIT pool rate-limit signal (spec 5.6) ---------------------------------
+# _call_provider returns only (content, error), so the pool needs a
+# separate signal to tell a 429 from an ordinary generation failure:
+# a timestamped marker per provider.
+
+def test_429_marks_rate_limit_hit(monkeypatch):
+    import time
+
+    import llm
+
+    monkeypatch.setattr(llm, "_RATE_LIMIT_HITS", {})
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    _stub_keys(monkeypatch, llm)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(url)
+        return _fake_response("", status_code=429, text="Too Many Requests")
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    t0 = time.time()
+    content, error = llm._call_provider("groq", "prompt", "system", 2, 0)
+    assert content is None
+    assert len(calls) == 2
+    assert "groq" in llm._RATE_LIMIT_HITS
+    assert llm.was_rate_limited_since(t0) is True
+    # A window starting after the hit sees nothing.
+    assert llm.was_rate_limited_since(time.time() + 100) is False
+
+
+def test_non_429_failure_does_not_mark(monkeypatch):
+    import time
+
+    import llm
+
+    monkeypatch.setattr(llm, "_RATE_LIMIT_HITS", {})
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    _stub_keys(monkeypatch, llm)
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _fake_response("", status_code=500, text="boom")
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    t0 = time.time()
+    content, error = llm._call_provider("groq", "prompt", "system", 1, 0)
+    assert content is None
+    assert llm.was_rate_limited_since(t0) is False
+
+
+def test_local_throttle_marks_rate_limit(monkeypatch):
+    import time
+    from collections import defaultdict
+
+    import llm
+
+    monkeypatch.setattr(llm, "_RATE_LIMIT_HITS", {})
+    monkeypatch.setattr(llm, "_request_history", defaultdict(list))
+    _stub_keys(monkeypatch, llm)
+    for _ in range(10):
+        llm._record_request("groq")
+    assert llm._can_send("groq") is False
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        raise AssertionError("throttled call must not reach the network")
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    t0 = time.time()
+    content, error = llm._call_provider("groq", "prompt", "system", 1, 0)
+    assert content is None
+    assert "Rate limit" in error
+    assert llm.was_rate_limited_since(t0) is True
+
+
+def test_disabled_provider_throttle_does_not_mark(monkeypatch):
+    import time
+    from collections import defaultdict
+
+    import llm
+
+    monkeypatch.setattr(llm, "_RATE_LIMIT_HITS", {})
+    monkeypatch.setattr(llm, "_request_history", defaultdict(list))
+    monkeypatch.setattr(llm, "_DISABLED_PROVIDERS", {"groq"})
+    _stub_keys(monkeypatch, llm)
+    for _ in range(10):
+        llm._record_request("groq")
+    t0 = time.time()
+    content, error = llm._call_provider("groq", "prompt", "system", 1, 0)
+    assert content is None
+    assert "disabled" in error
+    assert llm.was_rate_limited_since(t0) is False

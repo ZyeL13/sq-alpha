@@ -25,6 +25,13 @@
 # a warning and the card renders without it; the polaroid can never
 # fail a render. Jitter is seeded from symbol + timestamp, so the
 # same input renders identical bytes with per-card variation.
+#
+# Reaction-only (JIT path): when card data carries a reaction, the
+# main polaroid is NOT drawn — a mini-polaroid of the reaction
+# illustration is pasted in the left margin zone instead, and the
+# top-right keeps $SYMBOL only. Reaction presence is the signal;
+# no flag is consulted. A missing illustration degrades to no
+# illustration (the sparkle stays); it can never fail a render.
 import math
 import os
 import random
@@ -62,12 +69,14 @@ _DEJAVU_FILES = {"bold": "DejaVuSans-Bold.ttf", "regular": "DejaVuSans.ttf"}
 
 # ---------------- card data ----------------
 
-def build_card_data(snapshot, card_type, question=None):
+def build_card_data(snapshot, card_type, question=None, reaction=None):
     """Build the render dict from a snapshot + card type.
 
     Raises ValueError for an unknown card type or missing data the
     type needs (Relative Weakness without BTC context). The caller
-    (card_renderer) converts this to CardRenderError.
+    (card_renderer) converts this to CardRenderError. `reaction` is
+    the winning draft's opening reaction (or None): it selects the
+    margin illustration and gates the main polaroid off.
     """
     if card_type not in CARD_LABELS:
         raise ValueError(f"unknown card type: {card_type!r}")
@@ -112,6 +121,7 @@ def build_card_data(snapshot, card_type, question=None):
         "stat2": stat2,
         "read": read,
         "question": question,
+        "reaction": reaction,
         "timestamp": token.get("timestamp"),
     }
 
@@ -323,6 +333,63 @@ def _paste_polaroid(img):
     img.paste(rot, (990, 118), rot)
 
 
+# ---------------- reaction illustration ----------------
+
+# Tests point this at a tmp dir; None means "use ILLUSTRATIONS_DIR
+# from config" (mirrors the _KALAM_DIRS override pattern).
+_ILLUSTRATIONS_DIR = None
+
+
+def _resolve_art_dir():
+    if _ILLUSTRATIONS_DIR is not None:
+        return _ILLUSTRATIONS_DIR
+    from config import ILLUSTRATIONS_DIR
+
+    return ILLUSTRATIONS_DIR
+
+
+def _paste_reaction(img, reaction):
+    """Mini-polaroid of the avatar reaction in the left margin zone.
+    Geometry from the proven mockup (mockup_reaction_only.py):
+    head+shoulders crop (56,10,456,410), 132px photo, 148x168 frame,
+    one tape strip, +4 deg, pasted at (28,285) with the shadow at
+    (32,291). The variant comes from the rotation cursor (peeks the
+    variant this post will consume when it schedules).
+
+    Best-effort: a missing/unreadable file logs a warning and the
+    card renders without the illustration; the sparkle stays. Never
+    raises past the caller's guard.
+    """
+    from PIL import Image, ImageDraw
+
+    art_dir = _resolve_art_dir()
+    try:
+        from prompts.reactions import current_variant
+
+        variant = current_variant(reaction)
+    except Exception:
+        variant = "a"
+    path = os.path.join(art_dir, f"{reaction}_{variant}.jpg")
+    try:
+        photo = Image.open(path).convert("RGB")
+    except Exception as e:
+        logger.warning(f"reaction art missing ({path}: {e}); no illustration")
+        return
+    photo = photo.crop((56, 10, 456, 410))
+    photo = photo.resize((132, 132), Image.LANCZOS)
+    pol = Image.new("RGBA", (148, 168), (255, 255, 255, 255))
+    pol.paste(photo, (8, 8))
+    tape = Image.new("RGBA", pol.size, (0, 0, 0, 0))
+    td = ImageDraw.Draw(tape)
+    td.rectangle([54, -6, 94, 12], fill=(232, 222, 180, 190))
+    pol = Image.alpha_composite(pol, tape)
+    rot = pol.rotate(4, expand=True, resample=Image.BICUBIC)
+    sh = Image.new("RGBA", rot.size, (0, 0, 0, 0))
+    sh.paste((60, 50, 30, 70), (0, 0), rot.split()[3])
+    img.paste(sh, (32, 291), sh)
+    img.paste(rot, (28, 285), rot)
+
+
 # ---------------- card ----------------
 
 def render_sketchnote_image(card_data, seed=None):
@@ -435,8 +502,17 @@ def render_sketchnote_image(card_data, seed=None):
            font=_sketch_font(False, 20), fill=MUTED)
     d.text((W - 48 - _text_w(d, foot, _sketch_font(False, 20)), 644), foot,
            font=_sketch_font(False, 20), fill=MUTED)
-    try:
-        _paste_polaroid(img)
-    except Exception as e:
-        logger.warning(f"polaroid paste failed ({e}); card without it")
+    reaction = card_data.get("reaction")
+    if reaction:
+        # Reaction-only: the margin illustration replaces the main
+        # polaroid; the top-right keeps $SYMBOL only.
+        try:
+            _paste_reaction(img, reaction)
+        except Exception as e:
+            logger.warning(f"reaction paste failed ({e}); card without it")
+    else:
+        try:
+            _paste_polaroid(img)
+        except Exception as e:
+            logger.warning(f"polaroid paste failed ({e}); card without it")
     return img

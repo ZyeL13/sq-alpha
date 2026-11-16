@@ -32,6 +32,16 @@ NEWS_REVIEW_FILE = f"{CACHE_DIR}/news_review.json"
 POST_COUNTER_FILE = f"{CACHE_DIR}/post_counter.json"
 FORMAT_COUNTER_FILE = f"{CACHE_DIR}/format_counter.json"
 OPENING_ANGLE_FILE = f"{CACHE_DIR}/opening_angles.json"
+REACTIONS_FILE = f"{CACHE_DIR}/reactions_used.json"
+POST_MEMORY_FILE = f"{CACHE_DIR}/post_memory.json"
+REACTION_VARIANTS_FILE = f"{CACHE_DIR}/reaction_variants.json"
+
+# Reaction illustrations: 8 reactions x 4 variants, named
+# <reaction>_<variant>.jpg (see assets/illustrations/README.md).
+# Delivered to the VPS at deploy time (binaries can't ride the
+# snapshot push); missing files degrade to no illustration.
+ILLUSTRATIONS_DIR = os.getenv(
+    "ILLUSTRATIONS_DIR", os.path.join(BASE_DIR, "assets", "illustrations"))
 FIRST_SEEN_FILE = f"{CACHE_DIR}/first_seen.json"
 COINGECKO_CACHE_FILE = f"{CACHE_DIR}/coingecko_cache.json"
 LLM_CACHE_FILE = f"{CACHE_DIR}/llm_cache.json"
@@ -179,6 +189,30 @@ try:
     DAILY_POST_LIMIT = int(os.getenv("DAILY_POST_LIMIT", "10"))
 except ValueError:
     DAILY_POST_LIMIT = 10
+
+# ========== JIT SCHEDULING (draft pool) ==========
+# Kill switch: JIT_SCHEDULING=false restores the pre-JIT processor
+# path exactly (per-token quota check, immediate scheduling, old
+# opening angles). Read at import; a .env change needs a container
+# restart (docker compose up -d, no rebuild).
+JIT_SCHEDULING = os.getenv("JIT_SCHEDULING", "true").strip().lower() not in (
+    "false", "0", "no", "off")
+# Drafts generated per pool round (1-10). Pool 5 fits the Groq free
+# tier at 10 posts/day; at the temporary 25/day limit use 3. A
+# non-numeric value falls back to the default like DAILY_POST_LIMIT.
+try:
+    DRAFT_POOL_SIZE = int(os.getenv("DRAFT_POOL_SIZE", "5"))
+except ValueError:
+    DRAFT_POOL_SIZE = 5
+DRAFT_POOL_SIZE = max(1, min(10, DRAFT_POOL_SIZE))
+# Max scheduled posts waiting ahead (the next post + runway). The
+# processor/collector sleep when the buffer is full instead of
+# churning; scheduling stays chained 75-90 min apart.
+try:
+    SCHEDULE_BUFFER_MAX = int(os.getenv("SCHEDULE_BUFFER_MAX", "3"))
+except ValueError:
+    SCHEDULE_BUFFER_MAX = 3
+SCHEDULE_BUFFER_MAX = max(1, SCHEDULE_BUFFER_MAX)
 
 # ========== DEDUPLICATION ==========
 DEDUP_TTL_HOURS = 12         # hours before token can repeat in same category
