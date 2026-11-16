@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 from collections import deque
 
-from collectors.binance import fetch_all_binance, fetch_new_listings
+from collectors.binance import attach_btc_change, fetch_all_binance, fetch_new_listings
 from collectors.coingecko import enrich_tokens
 from collectors.coinmarketcap import enrich_tokens_cmc
 from collectors.rss_news import fetch_all_news, get_catalyst_summary, assign_news_to_tokens, find_big_unmatched, suggest_review_cashtag
@@ -15,9 +15,10 @@ from processors.normalize import normalize_token
 from processors.classify import classify
 from processors.score import score_token
 from processors.dedupe import is_duplicate, mark_posted, clear_old_entries
-from prompts.styles import select_post_format
-from generators.post_generator import generate_longform, generate_post
+from prompts.styles import card_type_angle, select_card_type, select_post_format
+from generators.post_generator import extract_closing_question, generate_longform, generate_post
 from schedulers.card_renderer import CardRenderError, render_card
+from schedulers.snapshot import build_snapshot
 from schedulers.poster import post_to_targets
 from storage.format_counter import get_format_counts, increment_format_count
 from config import (
@@ -153,6 +154,10 @@ def collector_worker():
             binance_tokens = fetch_all_binance(limit=200)
             new_listings = fetch_new_listings()
 
+            # BTC context for BTC-relative card rules: one attach per
+            # batch, carried through the queue like the news fields.
+            attach_btc_change(binance_tokens)
+
             # Enrich market caps (needed for ALPHA classification).
             # CoinGecko first (one cached call for the batch); CoinMarketCap
             # only fills symbols CoinGecko missed, and is a no-op without
@@ -225,6 +230,10 @@ def prepare_post(token, category, scores):
     extra LLM passes — exactly one generation call per post).
     Returns (content, format, title, image_paths), or None when
     nothing could be generated. Degradation, never drops:
+    - image + missing snapshot (klines failed) -> scheduled as
+      short text, and no image slot is consumed.
+    - image + no matching card type -> scheduled as short text,
+      and no image slot is consumed.
     - image + render failure -> scheduled as short text, and no
       image slot is consumed.
     - longform + render failure -> scheduled as an article without
@@ -238,6 +247,32 @@ def prepare_post(token, category, scores):
     symbol = token.get("symbol", "?")
     title = None
     image_paths = None
+    snapshot = None
+
+    card_type = None
+    if fmt == "image":
+        # ONE snapshot for this post: the prompt and the card both
+        # read from it, so their numbers can never disagree. No
+        # snapshot means no card data — text-only, slot not consumed.
+        snapshot = build_snapshot(token)
+        if snapshot is None:
+            print(f"  ⚠️ No klines for ${symbol}, falling back to short text")
+            audit_logger.info(f"IMAGE_FALLBACK|{symbol}|klines_failed")
+            fmt = "short"
+        else:
+            # The card type is decided BEFORE generation and drives
+            # the text (mapped opening angle + closing question).
+            # No matching type: an ordinary post, slot not consumed.
+            card_type = select_card_type(
+                change=token.get("price_change_percent", 0) or 0,
+                volume_ratio=snapshot.volume_ratio,
+                range_width_pct=snapshot.range_width_pct,
+                range_position=snapshot.range_position,
+                btc_relative=snapshot.btc_relative)
+            if card_type is None:
+                print(f"  ⚠️ No card type for ${symbol}, falling back to short text")
+                audit_logger.info(f"IMAGE_FALLBACK|{symbol}|no_card_type")
+                fmt = "short"
 
     if fmt == "longform":
         result = generate_longform(token, category, scores)
@@ -251,19 +286,40 @@ def prepare_post(token, category, scores):
             return content, fmt, None, None
         title, content = result
         try:
-            image_paths = [render_card(token)]
+            # Long-form covers keep the plain style: no snapshot is
+            # built on this path, and the cover contract is unchanged.
+            image_paths = [render_card(token, style="plain")]
         except CardRenderError as e:
             print(f"  ⚠️ Cover render failed for ${symbol} ({e}), publishing without cover")
             audit_logger.info(f"IMAGE_FALLBACK|{symbol}|cover_render_failed")
             image_paths = None
         return content, fmt, title, image_paths
 
-    content = generate_post(token, category, scores)
+    # Image posts generate from the snapshot-enriched token copy so
+    # the prompt carries the same derived numbers the card shows,
+    # with the card type's mapped opening angle and a closing
+    # question the card repeats. Exactly one LLM call, as always.
+    gen_token = token
+    opening_angle = None
+    closing_question = False
+    if fmt == "image" and snapshot is not None:
+        gen_token = dict(token)
+        gen_token["volume_7d_avg"] = snapshot.volume_7d_avg
+        gen_token["volume_ratio_7d"] = snapshot.volume_ratio
+        gen_token["btc_change_24h"] = snapshot.btc_change
+        opening_angle = card_type_angle(card_type)
+        closing_question = True
+
+    content = generate_post(gen_token, category, scores,
+                            opening_angle=opening_angle,
+                            closing_question=closing_question)
     if content is None:
         return None
     if fmt == "image":
         try:
-            image_paths = [render_card(token)]
+            image_paths = [render_card(
+                token, snapshot=snapshot, card_type=card_type,
+                question=extract_closing_question(content))]
         except CardRenderError as e:
             print(f"  ⚠️ Card render failed for ${symbol} ({e}), falling back to short text")
             audit_logger.info(f"IMAGE_FALLBACK|{symbol}|render_failed")
@@ -319,6 +375,11 @@ def processor_worker(worker_id: int):
                         token["price_at_news"] = raw["price_at_news"]
                     if "volume_at_news" in raw:
                         token["volume_at_news"] = raw["volume_at_news"]
+
+                    # normalize_token drops this field, so carry it
+                    # from the raw queue item like the news snapshot.
+                    if "btc_change_24h" in raw:
+                        token["btc_change_24h"] = raw["btc_change_24h"]
 
                     prepared = prepare_post(token, cat, scored["scores"])
                     if prepared:

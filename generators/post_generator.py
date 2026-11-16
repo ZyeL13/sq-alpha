@@ -8,6 +8,7 @@ from prompts.styles import (
     generate_data_anchor,
     insufficient_insight,
     next_opening_angle,
+    record_angle_used,
     select_editorial_style,
 )
 from config import LONGFORM_MAX_TOKENS
@@ -85,6 +86,26 @@ def _data_section(token: Dict[str, Any]) -> str:
     else:
         range_context = ""
 
+    # Snapshot context (image posts only): prepare_post enriches the
+    # token copy with these fields, so the prompt carries the same
+    # derived numbers the card shows. Short/long-form tokens never
+    # carry volume_ratio_7d, so their prompts are byte-identical.
+    snapshot_context = ""
+    ratio = token.get("volume_ratio_7d")
+    if ratio is not None:
+        try:
+            snapshot_context += f"\nvolume vs 7-day average: {float(ratio):.1f}x"
+        except (TypeError, ValueError):
+            pass
+        btc = token.get("btc_change_24h")
+        if btc is not None:
+            try:
+                snapshot_context += (
+                    f"\nBTC 24h change: {float(btc):+.1f}% "
+                    f"(this token {float(chg) - float(btc):+.1f} pts vs BTC)")
+            except (TypeError, ValueError):
+                pass
+
     data_section = data_anchor
     if range_context:
         data_section += f"\n{range_context}"
@@ -92,11 +113,14 @@ def _data_section(token: Dict[str, Any]) -> str:
         data_section += news_context
     if price_context_line:
         data_section += price_context_line
+    if snapshot_context:
+        data_section += snapshot_context
     return data_section
 
 
 def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] | None = None,
-                 opening_angle: "tuple[str, str] | None" = None) -> str:
+                 opening_angle: "tuple[str, str] | None" = None,
+                 closing_question: bool = False) -> str:
     """Build the user prompt for one post.
 
     Editorial v2: the style is selected from the token's own data
@@ -111,12 +135,24 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
     so consecutive posts open differently instead of converging on
     the model's default price-move opener. Callers may pass an
     explicit (name, instruction) pair; otherwise one is drawn here.
+
+    closing_question=True is the second, deliberate exception —
+    image posts only: the post must end with a closing question,
+    which the card then repeats verbatim (see extract_closing_
+    question). Text posts keep the no-forced-question rule.
     """
     symbol = token["symbol"]
     data_section = _data_section(token)
 
     style = select_editorial_style(token, scores)
     _, angle_text = opening_angle or next_opening_angle()
+    if closing_question:
+        ending_rule = ("- End the post with a closing question: the question "
+                       "the observation raises. It must be the last sentence "
+                       "of the post.")
+    else:
+        ending_rule = ("- End where the observation ends. No forced closing line, "
+                       "no forced question, no \"watching from here\" style sign-off.")
 
     prompt = f"""You are writing a short market observation post for Binance Square.
 
@@ -150,8 +186,7 @@ RULES:
   needs the room; never pad to fill space.
 - Separate paragraphs with ONE blank line. Never write large text blocks.
 - Paragraph count and lengths must vary; do not fall into a fixed shape.
-- End where the observation ends. No forced closing line, no forced
-  question, no "watching from here" style sign-off.
+{ending_rule}
 - Do not mention related tokens unless directly relevant to the data.
 - $SYMBOL and all token tickers MUST be uppercase: $XRP not $xrp, $BTC not $btc
 - Volume format: use capital M, $106.0M not $106.0m
@@ -287,7 +322,28 @@ def generate_longform(token: Dict[str, Any], category: str, scores: Dict[str, fl
     return title, body
 
 
-def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]) -> Optional[str]:
+def extract_closing_question(content: str):
+    """The post's closing question, or None.
+
+    The last sentence of the post, when the post ends with '?'.
+    Pure string work — the question is generated as part of the
+    post (one LLM call) and passed to the renderer, never invented
+    by it. Returns None when the post does not end with a question,
+    and the card then omits the question row.
+    """
+    import re
+
+    stripped = (content or "").strip()
+    if not stripped.endswith("?"):
+        return None
+    sentences = re.split(r"(?<=[.!?])\s+", stripped)
+    last = sentences[-1].strip() if sentences else ""
+    return last or None
+
+
+def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float],
+                  opening_angle: "tuple[str, str] | None" = None,
+                  closing_question: bool = False) -> Optional[str]:
     # Quality over quota: skip before any LLM call when there is
     # genuinely nothing to observe. The reason is audit-logged so the
     # skip rate can be evaluated (Editorial v2 KPI).
@@ -299,9 +355,16 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
 
     # Draw the opening angle here (not inside build_prompt) so the
     # audit log can record which angle each published post used.
-    angle_name, angle_text = next_opening_angle()
+    # Callers may pass an explicit angle (card-type mapping for
+    # image posts); it is recorded as used today, like a draw.
+    if opening_angle is None:
+        angle_name, angle_text = next_opening_angle()
+    else:
+        angle_name, angle_text = opening_angle
+        record_angle_used(angle_name)
     prompt = build_prompt(token, category, scores,
-                          opening_angle=(angle_name, angle_text))
+                          opening_angle=(angle_name, angle_text),
+                          closing_question=closing_question)
     content = generate(prompt, system_prompt=REBATE_SYSTEM, category=category)
 
     if not content or not isinstance(content, str):

@@ -229,7 +229,7 @@ def get_transition(probability: float = 0.2) -> str:
         return ""
     return random.choice(TRANSITIONS)
 
-from config import CLOSER_ENABLED
+from config import CLOSER_ENABLED, OPENING_ANGLE_FILE
 def get_closer(probability: float = 0.3) -> str:
     if not CLOSER_ENABLED:
         return ""
@@ -693,44 +693,189 @@ OPENING_ANGLES = {
     ),
 }
 
-# Rotating deck: every angle is used once per cycle before any
-# repeats, so consecutive posts never open the same way. The deck is
-# module state shared by all processor workers (guarded by a lock);
-# it is in-memory only, so a restart reshuffles — the only cost is
-# variety across the restart boundary, which is harmless.
+# Rotating deck, persistent per posting day: an angle used today is
+# never drawn again until the 07:00 WIB reset (same reset window as
+# the post counter). Used angles live in a small JSON file in cache/
+# (a Docker volume), so the exclusion survives restarts — the
+# in-memory deck is only the remainder of the current cycle. When
+# all 10 angles are used before the reset (possible above 10
+# posts/day), the used list clears and a fresh cycle starts: repeats
+# are allowed only after every angle has had its turn. All file
+# access is best-effort — a missing/corrupt/unwritable state file
+# degrades to the in-memory deck, never a crash. The lock is
+# re-entrant: record_angle_used is called both directly and from
+# inside next_opening_angle.
 _angle_deck: "list[str]" = []
-_angle_lock = threading.Lock()
+_angle_lock = threading.RLock()
 _last_angle: "str | None" = None
+# Tests point this at a tmp file; production uses the config path.
+ANGLE_STATE_FILE: str = OPENING_ANGLE_FILE
+
+
+def _today_key() -> str:
+    """Reset-window key for the current posting day. Same 07:00 WIB
+    window as storage/post_counter.py (RESET_HOUR stays the single
+    source of truth there); the computation is duplicated here so
+    prompts/ never imports storage/."""
+    from datetime import datetime, timedelta
+
+    from storage.post_counter import RESET_HOUR
+
+    from config import WIB
+
+    now = datetime.now(WIB)
+    reset = datetime(now.year, now.month, now.day, RESET_HOUR, 0, 0, tzinfo=WIB)
+    if now < reset:
+        reset -= timedelta(days=1)
+    return reset.strftime("%Y-%m-%d_%H:%M")
+
+
+def _read_used() -> "list[str]":
+    """Angles already used today, from the state file. Empty on any
+    failure or when the stored day is not today."""
+    import json
+    import os
+
+    try:
+        if not os.path.exists(ANGLE_STATE_FILE):
+            return []
+        with open(ANGLE_STATE_FILE, "r") as f:
+            data = json.load(f)
+        if data.get("reset_key") != _today_key():
+            return []
+        used = data.get("used", [])
+        return [u for u in used if u in OPENING_ANGLES]
+    except Exception:
+        return []
+
+
+def _write_used(used: "list[str]") -> None:
+    """Persist the used list for today. Best-effort; callers hold
+    _angle_lock."""
+    import json
+    import os
+
+    try:
+        os.makedirs(os.path.dirname(ANGLE_STATE_FILE), exist_ok=True)
+        with open(ANGLE_STATE_FILE, "w") as f:
+            json.dump({"reset_key": _today_key(), "used": used}, f)
+    except Exception:
+        pass
 
 
 def _refill_deck(rng: "random.Random | None" = None) -> None:
-    """Shuffle a fresh deck. The first card drawn (deck pops from the
-    end) is never the angle drawn last, so no two adjacent posts —
-    even across a cycle boundary — share an opening angle."""
+    """Shuffle a fresh deck from the angles not yet used today. The
+    first card drawn (deck pops from the end) is never the angle
+    drawn last, so no two adjacent posts — even across a cycle
+    boundary — share an opening angle. Callers hold _angle_lock."""
     global _angle_deck
-    names = list(OPENING_ANGLES)
+    used = _read_used()
+    names = [n for n in OPENING_ANGLES if n not in used]
+    if not names:
+        # Every angle used today: fresh cycle, used list restarts.
+        _write_used([])
+        names = list(OPENING_ANGLES)
     (rng or random).shuffle(names)
     if _last_angle is not None and len(names) > 1 and names[-1] == _last_angle:
         names[-1], names[0] = names[0], names[-1]
     _angle_deck = names
 
 
+def record_angle_used(name: str) -> None:
+    """Record an angle as used today (no double-record). Used by
+    the deck draw and by the card-type mapping, which assigns an
+    angle without drawing — later deck draws then skip it."""
+    with _angle_lock:
+        used = _read_used()
+        if name not in used:
+            used.append(name)
+            _write_used(used)
+
+
 def next_opening_angle() -> "tuple[str, str]":
-    """Draw the next (name, instruction) from the rotating deck."""
+    """Draw the next (name, instruction) from the rotating deck,
+    recording it as used today."""
     global _last_angle
     with _angle_lock:
         if not _angle_deck:
             _refill_deck()
         name = _angle_deck.pop()
         _last_angle = name
+        record_angle_used(name)
     return name, OPENING_ANGLES[name]
 
 
-def reset_opening_deck(seed: "int | None" = None) -> None:
-    """Empty the deck. Tests pass a seed for a deterministic order."""
+def reset_opening_deck(seed: "int | None" = None, clear_file: bool = True) -> None:
+    """Empty the deck. Tests pass a seed for a deterministic order.
+    clear_file=False keeps the state file (simulates a restart)."""
     global _angle_deck, _last_angle
     with _angle_lock:
         _angle_deck = []
         _last_angle = None
+        if clear_file:
+            _write_used([])
         if seed is not None:
             _refill_deck(random.Random(seed))
+
+
+# ========== CARD TYPES — Fase 3 redesign ==========
+# The card type is decided BEFORE generation from the snapshot's
+# signals (same thresholds as the spec's type table). Priority:
+# Relative Weakness > Volume Spike > Range Squeeze > Thin Tape,
+# first match wins. A token matching NO type stays a text post —
+# the image slot is not consumed. Pure function of explicit
+# signals: prompts/ never imports schedulers/, so the caller
+# (prepare_post) extracts the signals from the snapshot.
+# =========================================================
+
+def select_card_type(*, change: float, volume_ratio=None,
+                     range_width_pct=None, range_position: float = 0.5,
+                     btc_relative=None):
+    """Pick the card type for an image post, or None for text-only.
+
+    - relative_weakness: token change minus BTC change <= -5 pts
+      (needs BTC context; unknowable without it).
+    - volume_spike: 24h volume >= 2.0x the 7d daily average.
+    - range_squeeze: 24h range width < 3% AND range position 0.25-0.75.
+    - thin_tape: volume < 0.5x the 7d average AND |change| < 3%.
+    """
+    if btc_relative is not None and btc_relative <= -5:
+        return "relative_weakness"
+    if volume_ratio is not None and volume_ratio >= 2.0:
+        return "volume_spike"
+    if (range_width_pct is not None and range_width_pct < 3
+            and 0.25 <= range_position <= 0.75):
+        return "range_squeeze"
+    if (volume_ratio is not None and volume_ratio < 0.5
+            and abs(change) < 3):
+        return "thin_tape"
+    return None
+
+
+# Opening angle per card type (spec table). Types with two mapped
+# angles prefer the one not yet used today; the mapping wins even
+# when both were already used — the card and the text must agree.
+CARD_TYPE_ANGLES = {
+    "thin_tape": ("absence", "understatement"),
+    "volume_spike": ("participation", "contrast"),
+    "range_squeeze": ("range_position",),
+    "relative_weakness": ("contrast",),
+}
+
+
+def card_type_angle(card_type: str) -> "tuple[str, str]":
+    """The (name, instruction) opening angle for a card type.
+
+    Prefers the first mapped angle not yet used today; when every
+    mapped angle was already used, the first mapped angle still
+    wins over the deck. Callers record the angle via
+    record_angle_used (generate_post does this for explicit angles).
+    """
+    names = CARD_TYPE_ANGLES[card_type]
+    with _angle_lock:
+        used = _read_used()
+    for name in names:
+        if name not in used:
+            return name, OPENING_ANGLES[name]
+    name = names[0]
+    return name, OPENING_ANGLES[name]

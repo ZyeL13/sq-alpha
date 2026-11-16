@@ -31,6 +31,7 @@ NEWS_DEDUP_FILE = f"{CACHE_DIR}/news_dedup.json"
 NEWS_REVIEW_FILE = f"{CACHE_DIR}/news_review.json"
 POST_COUNTER_FILE = f"{CACHE_DIR}/post_counter.json"
 FORMAT_COUNTER_FILE = f"{CACHE_DIR}/format_counter.json"
+OPENING_ANGLE_FILE = f"{CACHE_DIR}/opening_angles.json"
 FIRST_SEEN_FILE = f"{CACHE_DIR}/first_seen.json"
 COINGECKO_CACHE_FILE = f"{CACHE_DIR}/coingecko_cache.json"
 LLM_CACHE_FILE = f"{CACHE_DIR}/llm_cache.json"
@@ -261,6 +262,12 @@ DAILY_POST_TARGET = 10  # soft limit (generation stops here; hard limit above is
 # a slot stays empty when no material justifies it.
 LONGFORM_MAX_PER_DAY = 1
 IMAGE_MAX_PER_DAY = 3
+# Card style for image posts: "sketchnote" (default, Fase 3
+# notebook-paper card) or "plain" (dark V3 snapshot card).
+# "annotated" is deferred and falls back to plain with a warning;
+# unknown values fall back to sketchnote with a warning (see
+# schedulers/card_renderer._resolve_style).
+CARD_STYLE = os.getenv("CARD_STYLE", "sketchnote").strip().lower()
 V3_IMAGE_PROVIDER = "local"  # "local" only in Phase 1/2; "gemini" is a Phase 3 option
 ARTICLE_MAX_CHARS = 5000  # probe-tunable; Square's 20013 limit is unpublished
 # Long-form-only LLM budget. gpt-oss-120b spends reasoning tokens out
