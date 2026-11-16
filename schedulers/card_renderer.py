@@ -1,12 +1,18 @@
-# schedulers/card_renderer.py — V3 Phase 2 local data-card renderer.
+# schedulers/card_renderer.py — V3 card renderer: style dispatch + plain style.
 #
-# Renders a 1200x675 PNG "market snapshot" card from the SAME token
-# data the post text uses (symbol, price, 24h change, 24h volume,
-# range position). No generic crypto artwork, no invented numbers,
-# no chart values beyond the ticker fields — the card restates the
-# post's own data in the SQ-Alpha visual identity (spec section 3):
-# dark charcoal/midnight background, muted cyan accent, white/soft
-# grey type, restrained red/green for direction only.
+# render_card() renders a 1200x675 PNG from the SAME token data the
+# post text uses. Two styles (CARD_STYLE env, default "sketchnote"):
+# - "plain": the original dark charcoal/midnight snapshot card
+#   (V3 Phase 2) — symbol, price, change, volume, range bar. Draws
+#   from the token dict only; needs no snapshot.
+# - "sketchnote": the Fase 3 notebook-paper card (see
+#   schedulers/sketchnote.py) — hero anomaly, sparkline, 2 stats,
+#   Read line, closing question, polaroid avatar. Needs a snapshot
+#   (klines sparkline) and a card type; without either it degrades
+#   to plain with a warning instead of failing.
+# - "annotated": DEFERRED (its mockup code was lost) — warns and
+#   falls back to plain. Unknown values warn and fall back to
+#   sketchnote.
 #
 # Placement: next to schedulers/square_media.py — this module makes
 # the artifact that module uploads. It is deliberately not in
@@ -21,11 +27,12 @@
 # is absent; the error then surfaces at render time, not at startup.
 #
 # Fonts: DejaVu Sans from fonts-dejavu-core (installed in the Docker
-# image). No font file is vendored in the repo. If no usable font is
-# found, rendering degrades to PIL's built-in default font instead
-# of failing. Note: DejaVu has no CJK glyphs, so a non-Latin ticker
-# renders with the font's fallback glyphs; the numbers (ASCII) are
-# always correct.
+# image) for the plain style; Kalam (fetched into the image, see the
+# Dockerfile) for the sketchnote style. No font file is vendored in
+# the repo. If no usable font is found, rendering degrades to PIL's
+# built-in default font instead of failing. Note: DejaVu has no CJK
+# glyphs, so a non-Latin ticker renders with the font's fallback
+# glyphs; the numbers (ASCII) are always correct.
 #
 # Cards land in cache/cards/ (a Docker volume, same as the queue
 # DB). Each render prunes cards older than 48h: a card can only
@@ -36,7 +43,11 @@ import re
 import time
 from datetime import datetime
 
-from config import CACHE_DIR, WIB
+import logging_config
+from config import CACHE_DIR, CARD_STYLE, WIB
+from schedulers.sketchnote import build_card_data, render_sketchnote_image
+
+logger = logging_config.get_logger("card_renderer")
 
 CARD_WIDTH = 1200
 CARD_HEIGHT = 675
@@ -64,6 +75,23 @@ _FONT_FILES = {"bold": "DejaVuSans-Bold.ttf", "regular": "DejaVuSans.ttf"}
 
 class CardRenderError(Exception):
     """Raised for any render failure. Callers fall back to text-only."""
+
+
+def _resolve_style(explicit=None) -> str:
+    """Resolve the card style: explicit arg > CARD_STYLE env.
+
+    "annotated" is deferred and falls back to plain; anything
+    unknown falls back to sketchnote. Both fallbacks warn.
+    """
+    raw = explicit if explicit is not None else CARD_STYLE
+    style = str(raw or "").strip().lower()
+    if style == "annotated":
+        logger.warning("CARD_STYLE=annotated is deferred; using plain")
+        return "plain"
+    if style in ("plain", "sketchnote"):
+        return style
+    logger.warning(f"unknown CARD_STYLE {raw!r}; using sketchnote")
+    return "sketchnote"
 
 
 def _fmt_price(price: float) -> str:
@@ -154,38 +182,13 @@ def _safe_filename(symbol: str) -> str:
     return safe or "TOKEN"
 
 
-def render_card(token: dict, output_dir: str | None = None) -> str:
-    """Render the snapshot card for one token. Returns the PNG path.
+def _render_plain_image(token: dict, price: float, change: float,
+                        volume: float):
+    """The original dark snapshot card (V3 Phase 2). Returns a PIL
+    Image. Pure function of the token dict."""
+    from PIL import Image, ImageDraw
 
-    Raises CardRenderError on any failure. Rendering is a pure
-    function of the token dict (the footer date comes from the
-    token's own timestamp), so the same input renders identical
-    bytes; only the filename carries wall-clock time.
-    """
     symbol = str(token.get("symbol") or "").strip()
-    if not symbol:
-        raise CardRenderError("no symbol in token data")
-    try:
-        price = float(token.get("price"))
-        change = float(token.get("price_change_percent"))
-        volume = float(token.get("volume_24h"))
-    except (TypeError, ValueError):
-        raise CardRenderError(f"non-numeric market data for ${symbol}")
-    if price <= 0:
-        raise CardRenderError(f"no usable price for ${symbol}")
-
-    try:
-        from PIL import Image, ImageDraw
-    except ImportError:
-        raise CardRenderError("Pillow not available")
-
-    out_dir = output_dir or CARDS_DIR
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-    except OSError as e:
-        raise CardRenderError(f"cannot create cards dir: {e}")
-    _prune_old_cards(out_dir)
-
     high = token.get("high_24h") or 0
     low = token.get("low_24h") or 0
     has_range = bool(high and low and high > low)
@@ -201,56 +204,111 @@ def render_card(token: dict, output_dir: str | None = None) -> str:
     except (TypeError, ValueError, OSError, OverflowError):
         date_text = datetime.now(WIB).strftime("%d %b %Y").upper()
 
+    img = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT), BG)
+    d = ImageDraw.Draw(img)
+
+    # Top accent bar + header.
+    d.rectangle([0, 0, CARD_WIDTH, 6], fill=ACCENT)
+    font_brand = _load_font(True, 30)
+    d.text((_MARGIN, 34), "SQ-ALPHA", fill=TEXT, font=font_brand)
+    font_kicker = _load_font(False, 24)
+    kicker = "24H SNAPSHOT"
+    d.text((_RIGHT - d.textlength(kicker, font=font_kicker), 40),
+           kicker, fill=MUTED, font=font_kicker)
+    d.line([(_MARGIN, 96), (_RIGHT, 96)], fill=RULE, width=2)
+
+    # Symbol, then price + change on one baseline.
+    font_symbol = _fit_font(d, f"${symbol}", True, 96, _RIGHT - _MARGIN)
+    d.text((_MARGIN, 122), f"${symbol}", fill=TEXT, font=font_symbol)
+    font_price = _load_font(True, 60)
+    price_text = _fmt_price(price)
+    d.text((_MARGIN, 292), price_text, fill=TEXT, font=font_price)
+    font_chg = _load_font(True, 52)
+    chg_x = _MARGIN + d.textlength(price_text, font=font_price) + 28
+    d.text((chg_x, 298), change_text, fill=chg_color, font=font_chg)
+
+    # Volume metric.
+    font_label = _load_font(False, 22)
+    d.text((_MARGIN, 396), "24H VOLUME", fill=MUTED, font=font_label)
+    font_value = _load_font(True, 36)
+    d.text((_MARGIN, 424), _fmt_volume(volume), fill=TEXT, font=font_value)
+
+    # Range bar (only when the ticker carries a real high/low).
+    if has_range:
+        bar_y = 520
+        d.rectangle([_MARGIN, bar_y, _RIGHT, bar_y + 10], fill=RULE)
+        marker_x = _MARGIN + range_pos * (_RIGHT - _MARGIN)
+        d.ellipse([marker_x - 9, bar_y - 4, marker_x + 9, bar_y + 14],
+                  fill=ACCENT, outline=TEXT, width=2)
+        font_range = _load_font(False, 22)
+        low_text = f"LOW {_fmt_price(low)}"
+        high_text = f"HIGH {_fmt_price(high)}"
+        d.text((_MARGIN, bar_y + 26), low_text, fill=MUTED, font=font_range)
+        d.text((_RIGHT - d.textlength(high_text, font=font_range), bar_y + 26),
+               high_text, fill=MUTED, font=font_range)
+
+    # Footer: data attribution + date.
+    font_foot = _load_font(False, 20)
+    d.text((_MARGIN, 622), "DATA: BINANCE 24H TICKER", fill=MUTED, font=font_foot)
+    d.text((_RIGHT - d.textlength(date_text, font=font_foot), 622),
+           date_text, fill=MUTED, font=font_foot)
+    return img
+
+
+def render_card(token: dict, output_dir: str | None = None,
+                *, snapshot=None, card_type=None, question=None,
+                style=None) -> str:
+    """Render the card for one token. Returns the PNG path.
+
+    Raises CardRenderError on any failure. Rendering is a pure
+    function of its inputs (the footer date comes from the token's
+    own timestamp), so the same input renders identical bytes;
+    only the filename carries wall-clock time.
+
+    `snapshot` + `card_type` select the sketchnote style's data;
+    `question` is the post's closing question, repeated on the
+    card (omitted when None). When the resolved style is sketchnote
+    but no snapshot/card_type is given, the render degrades to the
+    plain style instead of failing — the snapshot-missing fallback
+    to text-only lives in prepare_post, where slot accounting
+    happens. `style` overrides CARD_STYLE (tests, dry-run).
+    """
+    symbol = str(token.get("symbol") or "").strip()
+    if not symbol:
+        raise CardRenderError("no symbol in token data")
     try:
-        img = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT), BG)
-        d = ImageDraw.Draw(img)
+        price = float(token.get("price"))
+        change = float(token.get("price_change_percent"))
+        volume = float(token.get("volume_24h"))
+    except (TypeError, ValueError):
+        raise CardRenderError(f"non-numeric market data for ${symbol}")
+    if price <= 0:
+        raise CardRenderError(f"no usable price for ${symbol}")
 
-        # Top accent bar + header.
-        d.rectangle([0, 0, CARD_WIDTH, 6], fill=ACCENT)
-        font_brand = _load_font(True, 30)
-        d.text((_MARGIN, 34), "SQ-ALPHA", fill=TEXT, font=font_brand)
-        font_kicker = _load_font(False, 24)
-        kicker = "24H SNAPSHOT"
-        d.text((_RIGHT - d.textlength(kicker, font=font_kicker), 40),
-               kicker, fill=MUTED, font=font_kicker)
-        d.line([(_MARGIN, 96), (_RIGHT, 96)], fill=RULE, width=2)
+    try:
+        from PIL import Image  # noqa: F401  (import check; helpers use PIL)
+    except ImportError:
+        raise CardRenderError("Pillow not available")
 
-        # Symbol, then price + change on one baseline.
-        font_symbol = _fit_font(d, f"${symbol}", True, 96, _RIGHT - _MARGIN)
-        d.text((_MARGIN, 122), f"${symbol}", fill=TEXT, font=font_symbol)
-        font_price = _load_font(True, 60)
-        price_text = _fmt_price(price)
-        d.text((_MARGIN, 292), price_text, fill=TEXT, font=font_price)
-        font_chg = _load_font(True, 52)
-        chg_x = _MARGIN + d.textlength(price_text, font=font_price) + 28
-        d.text((chg_x, 298), change_text, fill=chg_color, font=font_chg)
+    out_dir = output_dir or CARDS_DIR
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as e:
+        raise CardRenderError(f"cannot create cards dir: {e}")
+    _prune_old_cards(out_dir)
 
-        # Volume metric.
-        font_label = _load_font(False, 22)
-        d.text((_MARGIN, 396), "24H VOLUME", fill=MUTED, font=font_label)
-        font_value = _load_font(True, 36)
-        d.text((_MARGIN, 424), _fmt_volume(volume), fill=TEXT, font=font_value)
+    resolved = _resolve_style(style)
+    if resolved == "sketchnote" and (snapshot is None or card_type is None):
+        logger.warning("sketchnote render needs snapshot + card type; "
+                       "falling back to plain")
+        resolved = "plain"
 
-        # Range bar (only when the ticker carries a real high/low).
-        if has_range:
-            bar_y = 520
-            d.rectangle([_MARGIN, bar_y, _RIGHT, bar_y + 10], fill=RULE)
-            marker_x = _MARGIN + range_pos * (_RIGHT - _MARGIN)
-            d.ellipse([marker_x - 9, bar_y - 4, marker_x + 9, bar_y + 14],
-                      fill=ACCENT, outline=TEXT, width=2)
-            font_range = _load_font(False, 22)
-            low_text = f"LOW {_fmt_price(low)}"
-            high_text = f"HIGH {_fmt_price(high)}"
-            d.text((_MARGIN, bar_y + 26), low_text, fill=MUTED, font=font_range)
-            d.text((_RIGHT - d.textlength(high_text, font=font_range), bar_y + 26),
-                   high_text, fill=MUTED, font=font_range)
-
-        # Footer: data attribution + date.
-        font_foot = _load_font(False, 20)
-        d.text((_MARGIN, 622), "DATA: BINANCE 24H TICKER", fill=MUTED, font=font_foot)
-        d.text((_RIGHT - d.textlength(date_text, font=font_foot), 622),
-               date_text, fill=MUTED, font=font_foot)
-
+    try:
+        if resolved == "sketchnote":
+            card_data = build_card_data(snapshot, card_type, question)
+            img = render_sketchnote_image(card_data)
+        else:
+            img = _render_plain_image(token, price, change, volume)
         filename = f"{_safe_filename(symbol)}_{int(time.time() * 1000)}.png"
         path = os.path.join(out_dir, filename)
         img.save(path, format="PNG")

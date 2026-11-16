@@ -155,6 +155,28 @@ def fetch_binance_tickers(retries: int = 3) -> List[Dict[str, Any]]:
     return []
 
 
+def attach_btc_change(tokens: List[Dict[str, Any]]):
+    """Attach BTCUSDT's 24h change to every token as btc_change_24h.
+
+    BTC is fetched with all tickers, so the collector calls this
+    once per batch and the processor can compute BTC-relative
+    performance without a second request. Returns the BTC change,
+    or None when BTC is absent from the batch (fetch anomaly) —
+    tokens then carry None and BTC-relative rules treat the
+    context as missing instead of as 0%.
+    """
+    btc = next((t for t in tokens if t.get("symbol") == "BTC"), None)
+    change = None
+    if btc is not None:
+        try:
+            change = float(btc.get("price_change_percent"))
+        except (TypeError, ValueError):
+            change = None
+    for token in tokens:
+        token["btc_change_24h"] = change
+    return change
+
+
 def fetch_all_binance(limit: int = None) -> List[Dict[str, Any]]:
     """Main entry point - fetch and add age_hours"""
     tokens = fetch_binance_tickers()

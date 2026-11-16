@@ -702,9 +702,11 @@ OPENING_ANGLES = {
 # posts/day), the used list clears and a fresh cycle starts: repeats
 # are allowed only after every angle has had its turn. All file
 # access is best-effort — a missing/corrupt/unwritable state file
-# degrades to the in-memory deck, never a crash.
+# degrades to the in-memory deck, never a crash. The lock is
+# re-entrant: record_angle_used is called both directly and from
+# inside next_opening_angle.
 _angle_deck: "list[str]" = []
-_angle_lock = threading.Lock()
+_angle_lock = threading.RLock()
 _last_angle: "str | None" = None
 # Tests point this at a tmp file; production uses the config path.
 ANGLE_STATE_FILE: str = OPENING_ANGLE_FILE
@@ -779,6 +781,17 @@ def _refill_deck(rng: "random.Random | None" = None) -> None:
     _angle_deck = names
 
 
+def record_angle_used(name: str) -> None:
+    """Record an angle as used today (no double-record). Used by
+    the deck draw and by the card-type mapping, which assigns an
+    angle without drawing — later deck draws then skip it."""
+    with _angle_lock:
+        used = _read_used()
+        if name not in used:
+            used.append(name)
+            _write_used(used)
+
+
 def next_opening_angle() -> "tuple[str, str]":
     """Draw the next (name, instruction) from the rotating deck,
     recording it as used today."""
@@ -788,10 +801,7 @@ def next_opening_angle() -> "tuple[str, str]":
             _refill_deck()
         name = _angle_deck.pop()
         _last_angle = name
-        used = _read_used()
-        if name not in used:
-            used.append(name)
-            _write_used(used)
+        record_angle_used(name)
     return name, OPENING_ANGLES[name]
 
 
@@ -806,3 +816,66 @@ def reset_opening_deck(seed: "int | None" = None, clear_file: bool = True) -> No
             _write_used([])
         if seed is not None:
             _refill_deck(random.Random(seed))
+
+
+# ========== CARD TYPES — Fase 3 redesign ==========
+# The card type is decided BEFORE generation from the snapshot's
+# signals (same thresholds as the spec's type table). Priority:
+# Relative Weakness > Volume Spike > Range Squeeze > Thin Tape,
+# first match wins. A token matching NO type stays a text post —
+# the image slot is not consumed. Pure function of explicit
+# signals: prompts/ never imports schedulers/, so the caller
+# (prepare_post) extracts the signals from the snapshot.
+# =========================================================
+
+def select_card_type(*, change: float, volume_ratio=None,
+                     range_width_pct=None, range_position: float = 0.5,
+                     btc_relative=None):
+    """Pick the card type for an image post, or None for text-only.
+
+    - relative_weakness: token change minus BTC change <= -5 pts
+      (needs BTC context; unknowable without it).
+    - volume_spike: 24h volume >= 2.0x the 7d daily average.
+    - range_squeeze: 24h range width < 3% AND range position 0.25-0.75.
+    - thin_tape: volume < 0.5x the 7d average AND |change| < 3%.
+    """
+    if btc_relative is not None and btc_relative <= -5:
+        return "relative_weakness"
+    if volume_ratio is not None and volume_ratio >= 2.0:
+        return "volume_spike"
+    if (range_width_pct is not None and range_width_pct < 3
+            and 0.25 <= range_position <= 0.75):
+        return "range_squeeze"
+    if (volume_ratio is not None and volume_ratio < 0.5
+            and abs(change) < 3):
+        return "thin_tape"
+    return None
+
+
+# Opening angle per card type (spec table). Types with two mapped
+# angles prefer the one not yet used today; the mapping wins even
+# when both were already used — the card and the text must agree.
+CARD_TYPE_ANGLES = {
+    "thin_tape": ("absence", "understatement"),
+    "volume_spike": ("participation", "contrast"),
+    "range_squeeze": ("range_position",),
+    "relative_weakness": ("contrast",),
+}
+
+
+def card_type_angle(card_type: str) -> "tuple[str, str]":
+    """The (name, instruction) opening angle for a card type.
+
+    Prefers the first mapped angle not yet used today; when every
+    mapped angle was already used, the first mapped angle still
+    wins over the deck. Callers record the angle via
+    record_angle_used (generate_post does this for explicit angles).
+    """
+    names = CARD_TYPE_ANGLES[card_type]
+    with _angle_lock:
+        used = _read_used()
+    for name in names:
+        if name not in used:
+            return name, OPENING_ANGLES[name]
+    name = names[0]
+    return name, OPENING_ANGLES[name]

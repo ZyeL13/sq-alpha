@@ -170,27 +170,50 @@ def test_counter_tolerates_corrupt_file(counter_file, monkeypatch):
 
 # ------------------------------------------------------------- prepare_post
 @pytest.fixture
-def orch(monkeypatch):
-    """Orchestrator with generation + rendering mocked, counts at zero."""
+def orch(monkeypatch, tmp_path):
+    """Orchestrator with generation + rendering + snapshot mocked, counts at zero."""
     import schedulers.orchestrator as orch
+    import prompts.styles as styles
+    from schedulers.snapshot import CardSnapshot
 
-    calls = {"generate_post": [], "generate_longform": [], "render": []}
+    # Card-type angle mapping reads the persistent deck state: isolate it.
+    monkeypatch.setattr(styles, "ANGLE_STATE_FILE", str(tmp_path / "angles.json"))
+    styles.reset_opening_deck()
 
-    def fake_post(token, category, scores):
+    calls = {"generate_post": [], "generate_longform": [], "render": [],
+             "snapshots": [], "gen_tokens": [], "angles": [],
+             "closing": [], "card_types": [], "questions": []}
+    snapshot = CardSnapshot(token=_token(), closes=[2.0] * 24,
+                            volume_7d_avg=1_000_000, btc_change=2.0)
+
+    def fake_post(token, category, scores, opening_angle=None,
+                  closing_question=False):
         calls["generate_post"].append(token["symbol"])
-        return f"${token['symbol']} short body that is long enough to pass."
+        calls["gen_tokens"].append(dict(token))
+        calls["angles"].append(opening_angle)
+        calls["closing"].append(closing_question)
+        return (f"${token['symbol']} short body that is long enough to pass. "
+                f"Does the tape stay this loud?")
 
     def fake_longform(token, category, scores):
         calls["generate_longform"].append(token["symbol"])
         return (f"{token['symbol']}: 24h Read", f"${token['symbol']} article body.")
 
-    def fake_render(token):
+    def fake_render(token, snapshot=None, card_type=None, question=None,
+                    **kwargs):
         calls["render"].append(token["symbol"])
+        calls["snapshots"].append(snapshot)
+        calls["card_types"].append(card_type)
+        calls["questions"].append(question)
         return "/tmp/cards/KITE_1.png"
+
+    def fake_snapshot(token):
+        return snapshot
 
     monkeypatch.setattr(orch, "generate_post", fake_post)
     monkeypatch.setattr(orch, "generate_longform", fake_longform)
     monkeypatch.setattr(orch, "render_card", fake_render)
+    monkeypatch.setattr(orch, "build_snapshot", fake_snapshot)
     monkeypatch.setattr(orch, "get_format_counts", lambda: {"image": 0, "longform": 0})
     return orch, calls
 
@@ -223,11 +246,90 @@ def test_prepare_post_image_renders_card(orch):
     assert calls["render"] == ["KITE"]
 
 
+def test_prepare_post_image_passes_snapshot_and_enriched_token(orch):
+    orch_mod, calls = orch
+
+    token = _token(price_change_percent=12.0)
+    content, fmt, title, image_paths = orch_mod.prepare_post(token, "GAINERS", {"anomaly": 0.2})
+    assert fmt == "image"
+    assert calls["snapshots"] != [None]  # the render got the snapshot
+    assert calls["snapshots"][0].volume_7d_avg == 1_000_000
+    gen_token = calls["gen_tokens"][0]
+    assert gen_token["volume_7d_avg"] == 1_000_000
+    assert gen_token["volume_ratio_7d"] == pytest.approx(3.0)  # 3M / 1M
+    assert gen_token["btc_change_24h"] == 2.0
+    assert "volume_7d_avg" not in token  # the caller's token is untouched
+
+
+def test_prepare_post_image_missing_snapshot_degrades_to_short(orch, monkeypatch):
+    orch_mod, calls = orch
+
+    monkeypatch.setattr(orch_mod, "build_snapshot", lambda token: None)
+    token = _token(price_change_percent=12.0)
+    content, fmt, title, image_paths = orch_mod.prepare_post(token, "GAINERS", {"anomaly": 0.2})
+    assert fmt == "short"  # slot not consumed: counts increment on final fmt
+    assert image_paths is None
+    assert calls["render"] == []
+    assert content.startswith("$KITE")  # the post is never dropped
+
+
+def test_prepare_post_image_uses_mapped_angle_and_question(orch):
+    orch_mod, calls = orch
+
+    token = _token(price_change_percent=12.0)
+    content, fmt, title, image_paths = orch_mod.prepare_post(token, "GAINERS", {"anomaly": 0.2})
+    assert fmt == "image"
+    # Volume ratio 3.0 -> volume_spike -> participation/contrast angle.
+    angle_name, _ = calls["angles"][0]
+    assert angle_name in ("participation", "contrast")
+    assert calls["closing"] == [True]
+    assert calls["card_types"] == ["volume_spike"]
+    assert calls["questions"] == ["Does the tape stay this loud?"]
+    assert calls["generate_post"] == ["KITE"]  # exactly one generation call
+
+
+def test_prepare_post_short_uses_no_mapped_angle(orch):
+    orch_mod, calls = orch
+
+    orch_mod.prepare_post(_token(), "HOT", {"anomaly": 0.2})
+    assert calls["angles"] == [None]
+    assert calls["closing"] == [False]
+
+
+def test_prepare_post_no_card_type_degrades_to_short(orch, monkeypatch):
+    orch_mod, calls = orch
+    from schedulers.snapshot import CardSnapshot
+
+    # Big move (image format) but ordinary snapshot signals: ratio
+    # 1.0, wide range, no BTC lag -> no card type matches.
+    flat = CardSnapshot(token=_token(), closes=[2.0] * 24,
+                        volume_7d_avg=3_000_000, btc_change=2.0)
+    monkeypatch.setattr(orch_mod, "build_snapshot", lambda token: flat)
+    token = _token(price_change_percent=12.0)
+    content, fmt, title, image_paths = orch_mod.prepare_post(token, "GAINERS", {"anomaly": 0.2})
+    assert fmt == "short"
+    assert image_paths is None
+    assert calls["render"] == []
+    assert calls["angles"] == [None]  # generated as a plain short post
+    assert content.startswith("$KITE")
+
+
+def test_prepare_post_longform_does_not_fetch_snapshot(orch, monkeypatch):
+    orch_mod, calls = orch
+
+    seen = []
+    monkeypatch.setattr(orch_mod, "build_snapshot",
+                        lambda token: seen.append(token["symbol"]))
+    content, fmt, title, image_paths = orch_mod.prepare_post(_token(), "HOT", {"anomaly": 0.9})
+    assert fmt == "longform"
+    assert seen == []  # long-form covers keep the plain renderer
+
+
 def test_prepare_post_image_render_failure_degrades_to_short(orch, monkeypatch):
     orch_mod, calls = orch
     from schedulers.card_renderer import CardRenderError
 
-    def failing_render(token):
+    def failing_render(token, snapshot=None, **kwargs):
         raise CardRenderError("boom")
 
     monkeypatch.setattr(orch_mod, "render_card", failing_render)
@@ -256,7 +358,7 @@ def test_prepare_post_longform_render_failure_keeps_article_coverless(orch, monk
     from schedulers.card_renderer import CardRenderError
 
     monkeypatch.setattr(orch_mod, "render_card",
-                        lambda token: (_ for _ in ()).throw(CardRenderError("boom")))
+                        lambda token, snapshot=None, **kw: (_ for _ in ()).throw(CardRenderError("boom")))
     content, fmt, title, image_paths = orch_mod.prepare_post(_token(), "HOT", {"anomaly": 0.9})
     assert fmt == "longform"  # not truncated to short
     assert title == "KITE: 24h Read"
@@ -284,7 +386,7 @@ def test_prepare_post_longform_failure_falls_back_to_short(orch, monkeypatch):
 def test_prepare_post_generate_failure_returns_none(orch, monkeypatch):
     orch_mod, calls = orch
 
-    monkeypatch.setattr(orch_mod, "generate_post", lambda t, c, s: None)
+    monkeypatch.setattr(orch_mod, "generate_post", lambda t, c, s, **kw: None)
     assert orch_mod.prepare_post(_token(), "HOT", {"anomaly": 0.2}) is None
 
 

@@ -262,6 +262,12 @@ DAILY_POST_TARGET = 10  # soft limit (generation stops here; hard limit above is
 # a slot stays empty when no material justifies it.
 LONGFORM_MAX_PER_DAY = 1
 IMAGE_MAX_PER_DAY = 3
+# Card style for image posts: "sketchnote" (default, Fase 3
+# notebook-paper card) or "plain" (dark V3 snapshot card).
+# "annotated" is deferred and falls back to plain with a warning;
+# unknown values fall back to sketchnote with a warning (see
+# schedulers/card_renderer._resolve_style).
+CARD_STYLE = os.getenv("CARD_STYLE", "sketchnote").strip().lower()
 V3_IMAGE_PROVIDER = "local"  # "local" only in Phase 1/2; "gemini" is a Phase 3 option
 ARTICLE_MAX_CHARS = 5000  # probe-tunable; Square's 20013 limit is unpublished
 # Long-form-only LLM budget. gpt-oss-120b spends reasoning tokens out
