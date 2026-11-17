@@ -167,13 +167,18 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
             f"OPENING REACTION: {reaction_text}\n"
             "The first line decides whether the reader stops scrolling. Follow the\n"
             "reaction above — react to the data the way a person following this\n"
-            "token would, do NOT open with a plain price-move sentence. The first\n"
-            f"line still carries ${symbol} exactly once: weave the cashtag into the\n"
-            "reaction, do not bolt a price sentence in front of it."
+            "token would, do NOT open with a plain price-move sentence. The post\n"
+            f"MUST begin with ${symbol} as the very first characters: put the\n"
+            "reaction voice AFTER the cashtag in the same first line, never\n"
+            "before it. Do NOT open with any reaction word or phrase before the\n"
+            "cashtag — no leading I, Wait, Hmm, Hold on, So, Now, Again,\n"
+            "Surprise, or any other word before the cashtag. Shape:\n"
+            f"\"${symbol} did it again, third fade this week...\" — cashtag\n"
+            "first, reaction second."
         )
-        person_rule = ("- First person (\"I\") is allowed ONLY in the opening line, as part "
-                       "of the reaction. No \"we\", no \"you\" anywhere; the rest of "
-                       "the post stays third-person.")
+        person_rule = ("- First person (\"I\") is allowed ONLY AFTER the cashtag in the "
+                       "opening line, never as the first word. No \"we\", no "
+                       "\"you\" anywhere; the rest of the post stays third-person.")
     else:
         _, angle_text = opening_angle or next_opening_angle()
         opening_block = (
