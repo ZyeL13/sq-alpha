@@ -6,7 +6,9 @@ import pytest
 
 from processors.draft_scoring import (
     DraftScore,
+    _match_cited,
     extract_opener,
+    find_unmatched_numbers,
     pick_winner,
     score_draft,
 )
@@ -222,3 +224,48 @@ def test_total_is_sum_of_components():
     s = score_draft(_post("jumped +4.2% to $1.35."), _token(), 0.8)
     assert s.total == pytest.approx(s.signal + s.specificity + s.freshness)
     assert "signal=" in s.components_str()
+
+
+# ------------------------------------------- find_unmatched_numbers
+# (JSON validator's number check: same numbers dict the validator
+# tests use — plain snapshot numbers, no token enrichment.)
+_NUMBERS = {
+    "change": 4.2,
+    "price": 1.35,
+    "volume_ratio": 3.2,
+    "btc_change": 2.1,
+    "btc_relative": 2.1,
+    "volume": 106_000_000,
+    "high": 1.42,
+    "low": 1.08,
+}
+
+
+def test_find_unmatched_numbers_all_matched():
+    content = "$XYZ jumped +4.2% to $1.35 on volume 3.2x the 7-day average."
+    assert find_unmatched_numbers(content, _NUMBERS) == []
+
+
+def test_find_unmatched_numbers_reports_unmatched():
+    content = "$XYZ jumped +9.9% on the session."
+    assert "+9.9%" in find_unmatched_numbers(content, _NUMBERS)
+
+
+def test_find_unmatched_numbers_unmatched_dollar_and_ratio():
+    content = "$XYZ jumped to $5.55 on volume 7.7x the average."
+    unmatched = find_unmatched_numbers(content, _NUMBERS)
+    assert "$5.55" in unmatched
+    assert "7.7x" in unmatched
+
+
+def test_find_unmatched_numbers_ignores_bare_digits():
+    content = "$XYZ held for 3 days, a top 10 move."
+    assert find_unmatched_numbers(content, _NUMBERS) == []
+
+
+def test_find_unmatched_numbers_one_citation_one_key():
+    # +2.1% equals both change and btc_change: one citation, one key.
+    content = "$XYZ added +2.1% in line with the wider market move."
+    numbers = dict(_NUMBERS, change=2.1, btc_change=2.1)
+    assert _match_cited(content, numbers) == {"change"}
+    assert find_unmatched_numbers(content, numbers) == []

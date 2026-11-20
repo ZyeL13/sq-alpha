@@ -10,6 +10,7 @@ from collectors.binance import attach_btc_change, fetch_all_binance, fetch_new_l
 from collectors.coingecko import enrich_tokens
 from collectors.coinmarketcap import enrich_tokens_cmc
 from collectors.rss_news import fetch_all_news, get_catalyst_summary, assign_news_to_tokens, find_big_unmatched, suggest_review_cashtag
+import llm
 from llm import was_rate_limited_since
 from storage.news_dedup import is_news_seen, mark_news_used, clear_old_news_entries
 from storage.news_review import queue_for_review
@@ -21,11 +22,13 @@ from processors.dedupe import is_duplicate, mark_posted, clear_old_entries
 from processors.draft_scoring import pick_winner, score_draft
 from prompts.styles import card_type_angle, select_card_type, select_post_format
 from prompts.reactions import advance_variant, draw_reaction, record_reaction_used
+from generators import post_generator as _post_gen
 from generators.post_generator import extract_closing_question, generate_longform, generate_post
 from schedulers.card_renderer import CardRenderError, render_card
-from schedulers.snapshot import CardSnapshot, build_snapshot
+from schedulers.snapshot import CardSnapshot, build_snapshot, snapshot_dict_for_prompt
 from schedulers.poster import post_to_targets
 from storage.format_counter import get_format_counts, increment_format_count
+from storage.posts_csv import append_post_row
 from config import (
     PROCESSOR_WORKERS,
     COINGECKO_ENABLED,
@@ -36,6 +39,8 @@ from config import (
     JIT_SCHEDULING,
     DRAFT_POOL_SIZE,
     SCHEDULE_BUFFER_MAX,
+    ABSTAIN_THRESHOLD,
+    PROMPT_VERSION,
 )
 from schedulers.timing import get_post_delay, get_current_session
 from storage.post_counter import can_post, DAILY_POST_LIMIT, get_today_posts, get_seconds_until_reset
@@ -278,14 +283,16 @@ class Draft:
     snapshot: "CardSnapshot | None" = None
     card_type: "str | None" = None
     reaction: "str | None" = None
+    angle: "str | None" = None  # drawn angle/reaction echoed by the LLM (JSON "angle")
 
 
 def prepare_draft(token, category, scores, reaction=None, memory=None,
-                  total_score=0.0):
+                  total_score=0.0, avoid_openers=None):
     """Decide the format, generate once. No rendering.
 
     The format is decided BEFORE generation (spec section 7: no
-    extra LLM passes — exactly one generation call per draft).
+    extra LLM passes — exactly one generation call per draft, plus
+    at most one validation retry inside generate_post).
     Returns a Draft, or None when nothing could be generated.
     Degradation, never drops:
     - image + missing snapshot (klines failed) -> short text draft,
@@ -302,6 +309,11 @@ def prepare_draft(token, category, scores, reaction=None, memory=None,
     mapping) for this draft. `memory` is a pre-formatted MEMORY
     block for the prompt, or None. Both default to the pre-JIT
     behavior: angle deck / card-type mapping, no memory block.
+    `avoid_openers` is the 5 most recent scheduled post texts (the
+    prompt's avoid-list); None means generate_post gets no list.
+    generate_post returns the JSON dict; this function unwraps the
+    "post" field into Draft.content and the echoed "angle" into
+    Draft.angle.
     """
     fmt = select_post_format(token, category, scores, get_format_counts())
     symbol = token.get("symbol", "?")
@@ -341,13 +353,18 @@ def prepare_draft(token, category, scores, reaction=None, memory=None,
             print(f"  ⚠️ Long-form failed for ${symbol}, falling back to short text")
             audit_logger.info(f"LONGFORM_FALLBACK|{symbol}|{category}|generate_failed")
             fmt = "short"
-            content = generate_post(token, category, scores,
-                                    reaction=reaction, memory=memory)
-            if content is None:
+            snapshot_dict = snapshot_dict_for_prompt(token, snapshot)
+            generated = generate_post(token, category, scores,
+                                      reaction=reaction, memory=memory,
+                                      snapshot=snapshot, snapshot_dict=snapshot_dict,
+                                      avoid_openers=avoid_openers,
+                                      card_type=card_type)
+            if generated is None:
                 return None
-            return Draft(content=content, fmt=fmt, title=None, token=token,
+            return Draft(content=generated["post"], fmt=fmt, title=None, token=token,
                          category=category, scores=scores,
-                         total_score=total_score, reaction=reaction_name)
+                         total_score=total_score, reaction=reaction_name,
+                         angle=generated.get("angle") or reaction_name)
         title, content = result
         # Long-form articles carry no opener reaction; the tentative
         # draw (if any) is discarded with the draft's reaction slot.
@@ -372,16 +389,21 @@ def prepare_draft(token, category, scores, reaction=None, memory=None,
             opening_angle = card_type_angle(card_type)
         closing_question = True
 
-    content = generate_post(gen_token, category, scores,
-                            opening_angle=opening_angle,
-                            closing_question=closing_question,
-                            reaction=reaction, memory=memory)
-    if content is None:
+    snapshot_dict = snapshot_dict_for_prompt(gen_token, snapshot)
+    generated = generate_post(gen_token, category, scores,
+                              opening_angle=opening_angle,
+                              closing_question=closing_question,
+                              reaction=reaction, memory=memory,
+                              snapshot=snapshot, snapshot_dict=snapshot_dict,
+                              avoid_openers=avoid_openers,
+                              card_type=card_type)
+    if generated is None:
         return None
-    return Draft(content=content, fmt=fmt, title=None, token=token,
+    return Draft(content=generated["post"], fmt=fmt, title=None, token=token,
                  category=category, scores=scores, total_score=total_score,
                  snapshot=snapshot, card_type=card_type,
-                 reaction=reaction_name)
+                 reaction=reaction_name,
+                 angle=generated.get("angle") or reaction_name)
 
 
 def finalize_draft(draft):
@@ -530,6 +552,27 @@ def _collect_candidates(worker_id, pool_size):
     return candidates
 
 
+def _provider_meta():
+    """Provider/model that answered the last generation, or fallbacks.
+    Never hardcoded: both schedule sites read llm.last_call_meta."""
+    meta = llm.last_call_meta or {}
+    return meta.get("provider") or "unknown", meta.get("model") or ""
+
+
+def _record_scheduled_post(symbol, angle, card_type, content):
+    """One logs/posts.csv row for a scheduled post. Best-effort:
+    a logging failure must never break scheduling."""
+    try:
+        provider, model = _provider_meta()
+        append_post_row(symbol=symbol, angle=angle or "",
+                        card_type=card_type or "none",
+                        word_count=len((content or "").split()),
+                        model=model, provider=provider,
+                        prompt_version=PROMPT_VERSION)
+    except Exception as e:
+        logger.warning(f"posts.csv write failed for ${symbol}: {e}")
+
+
 def _schedule_winner(worker_id, draft, hook, scheduled_queue):
     """Finalize + schedule the pool winner: render, chain the time,
     record every commitment (format cap, dedupe, memory, reaction,
@@ -543,6 +586,7 @@ def _schedule_winner(worker_id, draft, hook, scheduled_queue):
     scheduled_time = _chain_time(scheduled_queue.get_last_post_time(),
                                  current_time, delay)
     session = get_current_session()
+    provider, _model = _provider_meta()
     scheduled_queue.add_post(
         post=content,
         category=draft.category,
@@ -550,11 +594,13 @@ def _schedule_winner(worker_id, draft, hook, scheduled_queue):
         scheduled_time=scheduled_time,
         hook=hook,
         session=session,
-        provider="blockrun",
+        provider=provider,
         format=fmt,
         title=title,
         image_paths=image_paths,
     )
+    _record_scheduled_post(symbol, draft.angle or draft.reaction,
+                           draft.card_type, content)
     # Scheduling is the commitment point for the per-format daily
     # caps, the dedupe record, the post memory, the reaction deck,
     # the variant rotation, and the news catalyst: losers record
@@ -605,6 +651,11 @@ def run_pool_round(worker_id, scheduled_queue=None):
             return False
         drafts = []
         rate_limited = False
+        # The avoid-list (5 most recent scheduled openers) is fetched
+        # once per round and feeds both the prompt (via prepare_draft)
+        # and the opener-freshness check below — one snapshot of the
+        # queue for the whole round.
+        recent_openers = queue.get_recent_scheduled_posts(5)
         for token, cat, scored, hook in candidates:
             memory_rec = get_memory(token["symbol"])
             reaction = draw_reaction(token, memory_rec)
@@ -615,7 +666,8 @@ def run_pool_round(worker_id, scheduled_queue=None):
             draft = prepare_draft(token, cat, scored["scores"],
                                   reaction=reaction,
                                   memory=memory_block or None,
-                                  total_score=scored["total"])
+                                  total_score=scored["total"],
+                                  avoid_openers=recent_openers)
             if draft is None:
                 if was_rate_limited_since(t0):
                     rate_limited = True
@@ -635,7 +687,7 @@ def run_pool_round(worker_id, scheduled_queue=None):
             # Single-draft pool: skip scoring, finalize directly.
             winner, winner_hook = drafts[0]
         else:
-            recent = queue.get_recent_scheduled_posts(5)
+            recent = recent_openers
             scored_drafts = []
             for draft, hook in drafts:
                 result = score_draft(draft.content, draft.token,
@@ -654,6 +706,18 @@ def run_pool_round(worker_id, scheduled_queue=None):
             if not scored_drafts:
                 print(f"  📭 P{worker_id}: pool round empty (all_rejected)")
                 audit_logger.info("POOL_EMPTY|all_rejected")
+                return False
+            # Abstain: when even the best draft is weak, schedule
+            # nothing — a quiet round beats a weak post. The next
+            # round proceeds normally (no sleep change).
+            best_total = max(s.total for _, _, s in scored_drafts)
+            if best_total < ABSTAIN_THRESHOLD:
+                print(f"  🙅 P{worker_id}: pool round abstains "
+                      f"(best {best_total:.1f} < {ABSTAIN_THRESHOLD})")
+                audit_logger.info(
+                    f"POOL_ABSTAIN|best={best_total:.1f}|"
+                    f"threshold={ABSTAIN_THRESHOLD}|"
+                    f"n_drafts={len(scored_drafts)}")
                 return False
             winner, winner_hook, _ = scored_drafts[pick_winner(
                 [s for _, _, s in scored_drafts])]
@@ -764,6 +828,7 @@ def processor_worker(worker_id: int):
 
                         session = get_current_session()
 
+                        provider, _model = _provider_meta()
                         scheduled_queue.add_post(
                             post=post,
                             category=cat,
@@ -771,11 +836,17 @@ def processor_worker(worker_id: int):
                             scheduled_time=scheduled_time,
                             hook=hook,
                             session=session,
-                            provider="blockrun",
+                            provider=provider,
                             format=fmt,
                             title=title,
                             image_paths=image_paths,
                         )
+                        # The card type is not returned by prepare_post
+                        # on this path; record image-vs-text only.
+                        _record_scheduled_post(
+                            token["symbol"],
+                            _post_gen.LAST_DRAFT_META.get("angle"),
+                            "image" if fmt == "image" else "none", post)
 
                         # Scheduling is the commitment point for the
                         # per-format daily caps (see storage/format_counter).

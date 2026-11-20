@@ -187,14 +187,23 @@ def orch(monkeypatch, tmp_path):
                             volume_7d_avg=1_000_000, btc_change=2.0)
 
     def fake_post(token, category, scores, opening_angle=None,
-                  closing_question=False, reaction=None, memory=None):
+                  closing_question=False, reaction=None, memory=None,
+                  **kwargs):
         calls["generate_post"].append(token["symbol"])
         calls["gen_tokens"].append(dict(token))
         calls["angles"].append(opening_angle)
         calls["closing"].append(closing_question)
         calls["reactions"] = calls.get("reactions", []) + [reaction]
-        return (f"${token['symbol']} short body that is long enough to pass. "
-                f"Does the tape stay this loud?")
+        # Step 1: generate_post returns the JSON dict; prepare_draft
+        # unwraps the "post" field.
+        return {
+            "event": f"{token['symbol']} moved",
+            "fact": "numbers from the token",
+            "interpretation": "the tape is telling",
+            "angle": (opening_angle[0] if opening_angle else "smug"),
+            "post": (f"${token['symbol']} short body that is long enough "
+                     f"to pass. Does the tape stay this loud?"),
+        }
 
     def fake_longform(token, category, scores):
         calls["generate_longform"].append(token["symbol"])

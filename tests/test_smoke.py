@@ -37,7 +37,7 @@ def test_config_loads():
     assert config.DAILY_POST_TARGET == 10
     assert set(config.LLM_PROVIDERS) == {
         "blockrun", "blockrun_llama", "blockrun_mistral",
-        "groq", "deepseek", "nvidia_nim",
+        "groq", "deepseek", "nvidia_nim", "coarena_luna",
     }
     assert config.ALPHA_MAX_MCAP == 5_000_000
 

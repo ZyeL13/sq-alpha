@@ -33,13 +33,24 @@ def _snapshot(token):
 @pytest.fixture
 def _stubs(monkeypatch):
     """Stub the format decision + generation; rendering is stubbed
-    per-test so each test controls whether it may run."""
+    per-test so each test controls whether it may run.
+
+    generate_post returns the step-1 JSON dict; the "post" field is
+    the content, "angle" the echoed drawn angle.
+    """
     calls = {}
+
+    def _fake_generate(*a, **k):
+        content = calls.get("content", "$NOVA test post.")
+        if content is None:
+            return None
+        return {"event": "e", "fact": "f", "interpretation": "i",
+                "angle": calls.get("angle", "smug"), "post": content}
+
     monkeypatch.setattr(orch, "select_post_format",
                         lambda *a, **k: calls.get("fmt", "short"))
     monkeypatch.setattr(orch, "get_format_counts", lambda: {})
-    monkeypatch.setattr(orch, "generate_post",
-                        lambda *a, **k: calls.get("content", "$NOVA test post."))
+    monkeypatch.setattr(orch, "generate_post", _fake_generate)
     monkeypatch.setattr(orch, "generate_longform",
                         lambda *a, **k: calls.get("longform"))
     return calls
@@ -150,7 +161,9 @@ def test_longform_generation_failure_falls_back_once(monkeypatch, _stubs):
     _stubs["longform"] = None
     calls = []
     monkeypatch.setattr(orch, "generate_post",
-                        lambda *a, **k: calls.append(1) or "$NOVA fallback.")
+                        lambda *a, **k: calls.append(1) or {
+                            "event": "e", "fact": "f", "interpretation": "i",
+                            "angle": "smug", "post": "$NOVA fallback."})
     draft = orch.prepare_draft(_token(), "GAINERS", {})
     assert draft.fmt == "short"
     assert draft.content == "$NOVA fallback."
@@ -174,19 +187,24 @@ def test_reaction_replaces_card_type_angle(monkeypatch, _stubs):
     monkeypatch.setattr(orch, "card_type_angle", _no_angle)
     seen = {}
     monkeypatch.setattr(orch, "generate_post",
-                        lambda *a, **k: seen.update(k) or "$NOVA reacted.")
+                        lambda *a, **k: seen.update(k) or {
+                            "event": "e", "fact": "f", "interpretation": "i",
+                            "angle": "smug", "post": "$NOVA reacted."})
     draft = orch.prepare_draft(
         token, "GAINERS", {},
         reaction=("smug", "SMUG TEXT"), memory="MEMORY BLOCK")
     assert draft.reaction == "smug"
+    assert draft.angle == "smug"
     assert seen["reaction"] == ("smug", "SMUG TEXT")
     assert seen["memory"] == "MEMORY BLOCK"
     assert seen["opening_angle"] is None
     assert seen["closing_question"] is True
+    assert seen["card_type"] == "volume_spike"
 
 
 def test_old_path_still_uses_card_type_angle(monkeypatch, _stubs):
     _stubs["fmt"] = "image"
+    _stubs["angle"] = "participation"
     token = _token()
     monkeypatch.setattr(orch, "build_snapshot", lambda t: _snapshot(t))
     monkeypatch.setattr(orch, "select_card_type", lambda **k: "volume_spike")
@@ -194,9 +212,12 @@ def test_old_path_still_uses_card_type_angle(monkeypatch, _stubs):
                         lambda ct: ("participation", "PARTICIPATION"))
     seen = {}
     monkeypatch.setattr(orch, "generate_post",
-                        lambda *a, **k: seen.update(k) or "$NOVA angled.")
+                        lambda *a, **k: seen.update(k) or {
+                            "event": "e", "fact": "f", "interpretation": "i",
+                            "angle": "participation", "post": "$NOVA angled."})
     draft = orch.prepare_draft(token, "GAINERS", {})
     assert draft.reaction is None
+    assert draft.angle == "participation"
     assert seen["opening_angle"] == ("participation", "PARTICIPATION")
     assert seen.get("reaction") is None
 

@@ -91,9 +91,11 @@ def test_build_prompt_carries_opening_angle():
     assert "OPENING ANGLE:" in prompt
     assert any(text in prompt for text in OPENING_ANGLES.values())
     # Anti-default instruction present, without naming the banned verb
-    # (naming it would prime the model to use it).
+    # (naming it would prime the model to use it). The check covers
+    # only the instruction part: the BAD few-shot example deliberately
+    # shows a "slipped" opener as a do-not-do-this.
     assert "do NOT open with a plain price-move sentence" in prompt
-    assert "slipped" not in prompt.lower()
+    assert "slipped" not in prompt.split("EXAMPLES")[0].lower()
 
 
 def test_build_prompt_honors_explicit_angle():

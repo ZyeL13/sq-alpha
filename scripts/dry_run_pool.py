@@ -32,6 +32,9 @@ import schedulers.card_renderer as card_renderer  # noqa: E402
 import schedulers.orchestrator as orch  # noqa: E402
 import schedulers.sketchnote as sketchnote  # noqa: E402
 import storage.memory_store as memory_store  # noqa: E402
+import storage.posts_csv as posts_csv  # noqa: E402
+from generators.json_validate import validate_draft_json  # noqa: E402
+from processors.draft_scoring import _token_numbers  # noqa: E402
 from schedulers.snapshot import CardSnapshot  # noqa: E402
 from storage.scheduled_post_queue import ScheduledPostQueue  # noqa: E402
 
@@ -91,7 +94,7 @@ TOKENS = [
 TEXTS = {
     "NOVA": ("$NOVA ripped +18.4% to $1.29 as volume ran 3.2x the 7-day "
              "average while BTC added 2.1%. Does the tape stay loud?"),
-    "KITE": ("$KITE squeezed +1.2% to $1.015 inside a 3% range all day, "
+    "KITE": ("$KITE squeezed +1.2% to $1.015 inside a tight range all day, "
              "barely moving while the rest of the board chopped around."),
     "WREN": ("$WREN slid -6.3% to $0.42 while BTC added 2.1%, lagging "
              "the market by a wide margin on a heavy tape. What gives?"),
@@ -162,6 +165,7 @@ def main():
     styles.ANGLE_STATE_FILE = os.path.join(state_dir, "opening_angles.json")
     styles.reset_opening_deck(clear_file=True)
     memory_store.MEMORY_FILE = os.path.join(state_dir, "post_memory.json")
+    posts_csv.POSTS_CSV_PATH = os.path.join(state_dir, "posts.csv")
     sketchnote._ILLUSTRATIONS_DIR = (REAL_ART if os.path.isdir(REAL_ART)
                                      else art_dir)
     card_renderer.CARDS_DIR = cards_dir
@@ -174,8 +178,9 @@ def main():
         "$NOVA slipped -2.1% on thin volume, nothing to chase.")
 
     # ---- recorders for the winner-only side effects ----
-    scored = []       # (symbol, reaction, DraftScore)
-    generated = []    # (symbol, reaction name or None, memory block or None)
+    scored = []       # (symbol, DraftScore)
+    generated = []    # (symbol, reaction name or None, memory block or None, json dict)
+    validated = []    # (symbol, valid, reason) — real validator, offline stub
     news_marked = []
     dedupe_marked = []
     formats = []
@@ -188,11 +193,28 @@ def main():
         return result
 
     def _fake_generate(token, category, scores, opening_angle=None,
-                       closing_question=False, reaction=None, memory=None):
-        generated.append((token["symbol"],
-                          reaction[0] if reaction else None,
-                          memory))
-        return TEXTS[token["symbol"]]
+                       closing_question=False, reaction=None, memory=None,
+                       **kwargs):
+        # Step 1: generate_post returns the JSON dict. The stub builds
+        # it from the fixed TEXTS and runs the REAL validator on it
+        # (offline) so the report shows validation outcomes; the
+        # stubbed draft is never gated by it (prepare_draft unwraps
+        # the dict as-is).
+        reaction_name = reaction[0] if reaction else None
+        d = {
+            "event": f"{token['symbol']} moved",
+            "fact": "numbers from the token",
+            "interpretation": "the tape is telling",
+            "angle": reaction_name or "unknown",
+            "post": TEXTS[token["symbol"]],
+        }
+        generated.append((token["symbol"], reaction_name, memory, d))
+        numbers = _token_numbers(token, kwargs.get("snapshot"))
+        ok, reason = validate_draft_json(
+            d, reaction_name or "unknown", numbers,
+            symbol=token["symbol"])
+        validated.append((token["symbol"], ok, reason))
+        return d
 
     # ---- stub the seams: generation, klines, dedupe, news, counts ----
     orch.data_queue = _FakeQueue(TOKENS)
@@ -220,7 +242,7 @@ def main():
     lines.append("")
     lines.append("DRAFTS (mechanical score 45 signal / 30 specificity / "
                  "25 freshness):")
-    gen_by_symbol = {s: (r, m) for s, r, m in generated}
+    gen_by_symbol = {s: (r, m) for s, r, m, _d in generated}
     for symbol, result in scored:
         reaction, memory = gen_by_symbol.get(symbol, (None, None))
         if result is None:
@@ -229,11 +251,24 @@ def main():
         lines.append(f"  ${symbol}  reaction={reaction}  "
                      f"total={result.total:.1f}  [{result.components_str()}]"
                      + ("  +memory" if memory else ""))
-    for symbol, reaction, memory in generated:
+    for symbol, reaction, memory, _d in generated:
         if symbol not in {s for s, _ in scored}:
             lines.append(f"  ${symbol}  reaction={reaction}  "
                          "(pool-1: scoring skipped)"
                          + ("  +memory" if memory else ""))
+    lines.append("")
+    lines.append("JSON REPLIES + VALIDATION (real validator, offline stub):")
+    for symbol, ok, reason in validated:
+        lines.append(f"  ${symbol}  valid={ok}"
+                     + ("" if ok else f"  reason={reason}"))
+    scored_totals = [r.total for _, r in scored if r is not None]
+    if scored_totals:
+        best = max(scored_totals)
+        abstained = (not scheduled) and best < orch.ABSTAIN_THRESHOLD
+        lines.append(f"ABSTAIN: {'yes' if abstained else 'no'} "
+                     f"(best={best:.1f}, threshold={orch.ABSTAIN_THRESHOLD})")
+    else:
+        lines.append("ABSTAIN: n/a (no scored drafts)")
     lines.append("")
     rows = queue.get_recent_scheduled_posts(5)
     winner_text = rows[0] if rows else None
@@ -247,6 +282,14 @@ def main():
     lines.append("")
     lines.append(f"scheduled rows: {queue.get_post_count()} "
                  f"(1 seeded + {'1 winner' if scheduled else '0'})")
+    csv_path = os.path.join(state_dir, "posts.csv")
+    if os.path.exists(csv_path):
+        with open(csv_path) as f:
+            csv_rows = f.read().strip().split("\n")
+        lines.append(f"posts.csv: {len(csv_rows) - 1} row(s)")
+        lines.append(f"  {csv_rows[-1]}")
+    else:
+        lines.append("posts.csv: (no file — nothing scheduled)")
     lines.append(f"format slots consumed: {formats or 'none'}")
     lines.append(f"dedupe marked: {dedupe_marked or 'none'}")
     lines.append(f"news marked (winner only): "
