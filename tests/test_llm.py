@@ -30,23 +30,57 @@ def test_config_models_are_current():
     # meta/llama-3.3-70b-instruct retired 2026-08-26 (HTTP 410 Gone).
     # NIM stays disabled until a replacement is verified live.
     assert config.LLM_PROVIDERS["nvidia_nim"]["enabled"] is False
-    assert config.CATEGORY_PREFERRED["ALPHA"] == "blockrun"
+    # Step 1 (spec §5.2): CATEGORY_PREFERRED is empty — weight order
+    # governs, so Luna (weight 7) is tried first on every category.
+    assert config.CATEGORY_PREFERRED == {}
+    # Luna (Coarena gpt-6-luna) registry entry.
+    luna = config.LLM_PROVIDERS["coarena_luna"]
+    assert luna["api_url"] == "https://coarena.ai/api/v1/chat/completions"
+    assert luna["model"] == "gpt-6-luna"
+    assert luna["max_tokens"] == 1200
+    assert luna["temperature"] == 0.5
+    assert luna["top_p"] == 0.9
+    assert luna["requests_per_minute"] == 10
+    assert luna["enabled"] is True
+    assert luna["weight"] == 7
+    assert config.ABSTAIN_THRESHOLD == 50.0
+    assert config.COARENA_SQALPHA_DAILY_CALLS == 100
+    assert config.PROMPT_VERSION == "json-v1"
 
 
 def _stub_keys(monkeypatch, llm):
     """Give the enabled providers keys so tests don't depend on env vars."""
-    for name in ("blockrun", "blockrun_llama", "blockrun_mistral", "groq"):
+    for name in ("coarena_luna", "blockrun", "blockrun_llama", "blockrun_mistral", "groq"):
         monkeypatch.setitem(llm.LLM_PROVIDERS[name], "api_key", "test-key")
 
 
-def test_generate_tries_blockrun_models_before_groq(monkeypatch):
+def _reset_coarena_state(monkeypatch, llm):
+    """Clear Luna marker/counter/meta so each Luna test starts fresh."""
+    monkeypatch.setattr(llm, "_COARENA_ALLOWANCE_RESET_UTC", 0.0)
+    monkeypatch.setattr(llm, "_COARENA_EXHAUSTION_LOGGED", {})
+    monkeypatch.setattr(llm, "_COARENA_CALL_COUNT", 0)
+    monkeypatch.setattr(llm, "_COARENA_CALL_COUNT_DATE", None)
+    monkeypatch.setattr(llm, "last_call_meta", None)
+    monkeypatch.setattr(llm, "_DISABLED_PROVIDERS", set())
+    from collections import defaultdict
+    monkeypatch.setattr(llm, "_request_history", defaultdict(list))
+
+
+def test_generate_tries_luna_before_blockrun_before_groq(monkeypatch):
+    """Step 1 (spec §5.2/§5.3): Luna first, then BlockRun, then Groq —
+    on every category, since CATEGORY_PREFERRED is empty."""
     import llm
 
     _stub_keys(monkeypatch, llm)
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
     tried = []
+    seen_kwargs = []
 
-    def fake_call(provider, user_prompt, system_prompt, max_retries, backoff):
+    def fake_call(provider, user_prompt, system_prompt, max_retries, backoff, **kwargs):
         tried.append(provider)
+        seen_kwargs.append(kwargs)
+        if provider == "coarena_luna":
+            return None, "allowance exhausted"
         if provider == "blockrun":
             return None, "connection refused"
         return "$XYZ test post content", None
@@ -54,20 +88,28 @@ def test_generate_tries_blockrun_models_before_groq(monkeypatch):
     monkeypatch.setattr(llm, "_call_provider", fake_call)
     result = llm.generate("prompt", category="ALPHA", use_cache=False)
     assert result == "$XYZ test post content"
-    assert tried == ["blockrun", "blockrun_llama"]
+    assert tried == ["coarena_luna", "blockrun", "blockrun_llama"]
+    # Default path passes no overrides (old fakes keep working).
+    assert seen_kwargs == [{}, {}, {}]
 
 
 def test_providers_without_api_key_are_skipped(monkeypatch):
     import llm
 
     _stub_keys(monkeypatch, llm)
+    # Luna sorts first (weight 7) when it has a key.
+    assert llm._get_providers_by_priority()[0] == "coarena_luna"
+    # Luna with an empty key is skipped, like DeepSeek.
+    monkeypatch.setitem(llm.LLM_PROVIDERS["coarena_luna"], "api_key", "")
+    assert "coarena_luna" not in llm._get_providers_by_priority()
+    monkeypatch.setitem(llm.LLM_PROVIDERS["coarena_luna"], "api_key", "test-key")
     monkeypatch.setitem(llm.LLM_PROVIDERS["deepseek"], "enabled", True)
     monkeypatch.setitem(llm.LLM_PROVIDERS["deepseek"], "api_key", "")
     assert "deepseek" not in llm._get_providers_by_priority()
     # With a key it rejoins the rotation (weight order).
     monkeypatch.setitem(llm.LLM_PROVIDERS["deepseek"], "api_key", "test-key")
     assert llm._get_providers_by_priority() == [
-        "blockrun", "blockrun_llama", "blockrun_mistral", "groq", "deepseek",
+        "coarena_luna", "blockrun", "blockrun_llama", "blockrun_mistral", "groq", "deepseek",
     ]
 
 
@@ -291,7 +333,7 @@ def test_generate_specific_provider_only(monkeypatch):
 
     tried = []
 
-    def fake_call(provider, user_prompt, system_prompt, max_retries, backoff):
+    def fake_call(provider, user_prompt, system_prompt, max_retries, backoff, **kwargs):
         tried.append(provider)
         return "$XYZ specific provider post", None
 
@@ -391,3 +433,255 @@ def test_disabled_provider_throttle_does_not_mark(monkeypatch):
     assert content is None
     assert "disabled" in error
     assert llm.was_rate_limited_since(t0) is False
+
+
+# --- Step 1: JSON output_format, last_call_meta, Luna 402/403/budget ---
+# (spec §3.4, §5). No live calls — same monkeypatched requests.post +
+# _fake_response pattern as the tests above.
+
+def test_output_format_json_bypasses_post_tags(monkeypatch):
+    """Regression test for spec §3.4.1: a JSON reply has no <post>
+    tags, so the default path would empty EVERY JSON call. With
+    output_format="json" the raw stripped content is returned."""
+    import llm
+
+    _reset_coarena_state(monkeypatch, llm)
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _fake_response(
+            '{"event": "listing", "fact": "volume up", '
+            '"interpretation": "momentum", "angle": "surprise", '
+            '"post": "$BTC test post content here, long enough ok"}'
+        )
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    content, error = llm._call_provider("groq", "prompt", "system", 1, 0,
+                                        output_format="json")
+    assert error is None
+    assert content.startswith("{")
+    assert '"post": "$BTC test post content here, long enough ok"' in content
+    # Default path still empties a tag-less reply (see
+    # test_response_without_post_tags_is_a_failure above).
+    content, error = llm._call_provider("groq", "prompt", "system", 1, 0)
+    assert content is None
+
+
+def test_output_format_json_still_rejects_short_content(monkeypatch):
+    """The len(content) >= 30 check still applies on the JSON path."""
+    import llm
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _fake_response('{"post": "$BTC ok"}')
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    content, error = llm._call_provider("groq", "prompt", "system", 1, 0,
+                                        output_format="json")
+    assert content is None
+    assert error is not None
+
+
+def test_generate_threads_output_format(monkeypatch):
+    """generate() passes output_format through to _call_provider on
+    both the single-provider and the priority-fallback path."""
+    import llm
+
+    _stub_keys(monkeypatch, llm)
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    seen = []
+
+    def fake_call(provider, user_prompt, system_prompt, max_retries, backoff, **kwargs):
+        seen.append((provider, kwargs))
+        return '{"post": "$XYZ json content here, long enough ok"}', None
+
+    monkeypatch.setattr(llm, "_call_provider", fake_call)
+    assert llm.generate("prompt", use_cache=False,
+                        output_format="json") is not None
+    assert seen == [("coarena_luna", {"output_format": "json"})]
+    seen.clear()
+    assert llm.generate("prompt", provider="groq", use_cache=False,
+                        output_format="json") is not None
+    assert seen == [("groq", {"output_format": "json"})]
+
+
+def test_last_call_meta_set_on_success(monkeypatch):
+    import llm
+
+    _reset_coarena_state(monkeypatch, llm)
+    assert llm.last_call_meta is None
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _fake_response("<post>$BTC test post content here, long enough ok</post>")
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    content, error = llm._call_provider("groq", "prompt", "system", 1, 0)
+    assert error is None
+    assert content.startswith("$BTC")
+    assert llm.last_call_meta["provider"] == "groq"
+    assert llm.last_call_meta["model"] == "openai/gpt-oss-120b"
+    assert isinstance(llm.last_call_meta["usage"], dict)
+    assert llm.last_call_meta["usage"] == {
+        "completion_tokens_details": {"reasoning_tokens": None}
+    }
+
+
+def test_luna_200_returns_content_and_meta(monkeypatch):
+    import llm
+
+    _reset_coarena_state(monkeypatch, llm)
+    _stub_keys(monkeypatch, llm)
+    seen = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen["url"] = url
+        seen["json"] = json
+        return _fake_response("<post>$BTC luna post content here, long enough ok</post>")
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    content, error = llm._call_provider("coarena_luna", "prompt", "system", 1, 0)
+    assert error is None
+    assert content == "$BTC luna post content here, long enough ok"
+    assert "coarena.ai" in seen["url"]
+    assert seen["json"]["model"] == "gpt-6-luna"
+    assert seen["json"]["max_tokens"] == 1200
+    assert llm.last_call_meta["provider"] == "coarena_luna"
+    assert llm.last_call_meta["model"] == "gpt-6-luna"
+
+
+def test_luna_402_no_retry_sets_marker(monkeypatch, capsys):
+    import llm
+
+    _reset_coarena_state(monkeypatch, llm)
+    _stub_keys(monkeypatch, llm)
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(url)
+        return _fake_response("", status_code=402, text="payment_required")
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    content, error = llm._call_provider("coarena_luna", "prompt", "system", 2, 0)
+    assert content is None
+    assert "402" in error
+    assert "allowance" in error.lower()
+    assert len(calls) == 1  # no retry consumed on a 402
+    assert llm._coarena_allowance_exhausted() is True
+    out = capsys.readouterr().out
+    assert "COARENA_ALLOWANCE_EXHAUSTED" in out
+    assert "reset_utc=" in out
+    # Priority list skips Luna while the marker is active, so later
+    # drafts go straight to BlockRun/Groq.
+    assert "coarena_luna" not in llm._get_providers_by_priority()
+    assert llm._get_providers_by_priority()[0] == "blockrun"
+    # The marker log fires once per UTC day: a second 402 attempt is
+    # short-circuited without sending and without a second log line.
+    content, error = llm._call_provider("coarena_luna", "prompt", "system", 2, 0)
+    assert content is None
+    assert len(calls) == 1
+    out = capsys.readouterr().out
+    assert "COARENA_ALLOWANCE_EXHAUSTED" not in out
+
+
+def test_other_provider_402_goes_generic_no_marker(monkeypatch):
+    """A 402 on a non-Luna provider is an ordinary failure: retried
+    per max_retries, no exhaustion marker, Luna unaffected."""
+    import llm
+
+    _reset_coarena_state(monkeypatch, llm)
+    _stub_keys(monkeypatch, llm)
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(url)
+        return _fake_response("", status_code=402, text="payment_required")
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    content, error = llm._call_provider("groq", "prompt", "system", 2, 0)
+    assert content is None
+    assert "402" not in error  # generic "All N attempts failed" error
+    assert len(calls) == 2  # retried, unlike Luna's 402
+    assert llm._coarena_allowance_exhausted() is False
+    assert "coarena_luna" in llm._get_providers_by_priority()
+
+
+def test_luna_403_terms_required_disables_no_retry(monkeypatch, capsys):
+    import llm
+
+    _reset_coarena_state(monkeypatch, llm)
+    _stub_keys(monkeypatch, llm)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(url)
+        return _fake_response(
+            "", status_code=403,
+            text='{"error": {"code": "model_api_terms_required", '
+                 '"message": "accept the Model API terms"}}',
+        )
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    content, error = llm._call_provider("coarena_luna", "prompt", "system", 2, 0)
+    assert content is None
+    assert "403" in error
+    assert len(calls) == 1  # no retry on a config error
+    assert "coarena_luna" in llm._DISABLED_PROVIDERS
+    assert "coarena_luna" not in llm._get_providers_by_priority()
+    out = capsys.readouterr().out
+    assert "accept Model API terms on the Coarena account page" in out
+    # Second call short-circuits without touching the network.
+    content, error = llm._call_provider("coarena_luna", "prompt", "system", 2, 0)
+    assert content is None
+    assert len(calls) == 1
+
+
+def test_other_403_goes_generic_no_disable(monkeypatch):
+    """A 403 without model_api_terms_required is an ordinary failure:
+    retried, provider NOT disabled."""
+    import llm
+
+    _reset_coarena_state(monkeypatch, llm)
+    _stub_keys(monkeypatch, llm)
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(url)
+        return _fake_response("", status_code=403, text="Forbidden")
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    content, error = llm._call_provider("coarena_luna", "prompt", "system", 2, 0)
+    assert content is None
+    assert len(calls) == 2  # retried
+    assert "coarena_luna" not in llm._DISABLED_PROVIDERS
+    assert "coarena_luna" in llm._get_providers_by_priority()
+
+
+def test_luna_call_budget_blocks_after_limit(monkeypatch, capsys):
+    """Call-count cap (spec §5.4): exactly N calls are sent, the
+    (N+1)th is blocked without sending and sets the same exhaustion
+    marker as a 402, logging COARENA_CALL_BUDGET once."""
+    import llm
+
+    _reset_coarena_state(monkeypatch, llm)
+    _stub_keys(monkeypatch, llm)
+    monkeypatch.setattr(llm, "COARENA_SQALPHA_DAILY_CALLS", 2)
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(url)
+        return _fake_response("<post>$BTC luna post content here, long enough ok</post>")
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    assert llm._call_provider("coarena_luna", "prompt", "system", 1, 0)[0] is not None
+    assert llm._call_provider("coarena_luna", "prompt", "system", 1, 0)[0] is not None
+    assert len(calls) == 2
+    content, error = llm._call_provider("coarena_luna", "prompt", "system", 1, 0)
+    assert content is None
+    assert "budget" in error.lower()
+    assert len(calls) == 2  # blocked call never sent
+    assert llm._coarena_allowance_exhausted() is True
+    assert "coarena_luna" not in llm._get_providers_by_priority()
+    out = capsys.readouterr().out
+    assert "COARENA_CALL_BUDGET" in out
+    assert "limit=2" in out

@@ -13,6 +13,57 @@ log = logging.getLogger(__name__)
 # post adalah <=1 jam sejak kejadian (lihat audit berita Fase 1).
 NEWS_MAX_AGE_SECONDS = 3600
 
+_URL_RE = re.compile(r"https?://\S+")
+_FENCE_SPAN_RE = re.compile(r"```.*?```", re.DOTALL)
+_BULLET_AT_LINE_START_RE = re.compile(r"^\s*[•\-*]\s*")
+
+# Awal baris yang menandai baris instruksi (prompt injection lewat
+# feed): baris seperti itu dibuang utuh sebelum teks masuk ke prompt.
+_INSTRUCTION_PREFIXES = ("ignore", "instruction:", "system:", "you are")
+
+
+def sanitize_article_text(text: str) -> str:
+    """Bersihkan teks artikel RSS sebelum masuk ke prompt (spec §2.6).
+
+    Buang karakter kontrol (ord < 32; tab jadi spasi, newline
+    dipertahankan sampai pemrosesan baris selesai), buang URL, buang
+    pagar markdown / blok kode (```...``` maupun pagar tunggal),
+    buang baris yang mirip instruksi, ganti newline / bullet di awal
+    baris dengan spasi, lalu ratakan semua whitespace jadi satu spasi.
+    Kembalikan "" untuk input falsy.
+    """
+    if not text:
+        return ""
+    kept = []
+    for ch in text:
+        if ord(ch) < 32:
+            if ch == "\n":
+                kept.append("\n")
+            elif ch == "\t":
+                kept.append(" ")
+            # Karakter kontrol lain dibuang.
+        else:
+            kept.append(ch)
+    text = "".join(kept)
+    text = _URL_RE.sub("", text)
+    text = _FENCE_SPAN_RE.sub("", text)
+    text = text.replace("```", "")
+    lines = []
+    for line in text.split("\n"):
+        if line.strip().lower().startswith(_INSTRUCTION_PREFIXES):
+            continue
+        lines.append(_BULLET_AT_LINE_START_RE.sub(" ", line))
+    return re.sub(r"\s+", " ", " ".join(lines)).strip()
+
+
+def _sanitize_link(link: str) -> str:
+    """Sanitasi link: buang karakter kontrol + whitespace di ujung
+    saja. URL-nya sendiri TIDAK pernah dibuang — link adalah kunci
+    dedupe artikel."""
+    if not link:
+        return ""
+    return "".join(ch for ch in str(link) if ord(ch) >= 32).strip()
+
 # Hanya sumber yang valid dan cepat.
 # theblock + cryptoslate ditambah Langkah 8 — keduanya diverifikasi
 # live (200 + RSS valid + tanggal terbit terbaca) pada 2026-11-08.
@@ -91,9 +142,10 @@ def fetch_feed(source_name: str, url: str, max_articles: int = 10, timeout: int 
                             f"{entry.get('title', '')[:80]!r}")
             
             articles.append({
-                "title": entry.get('title', ''),
-                "link": entry.get('link', ''),
-                "summary": entry.get('summary', '')[:300],
+                "title": sanitize_article_text(entry.get('title', '')),
+                "link": _sanitize_link(entry.get('link', '')),
+                "summary": sanitize_article_text(
+                    entry.get('summary', '')[:300]),
                 "published": published,
                 "timestamp": pub_time,
                 "source": source_name,

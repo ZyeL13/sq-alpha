@@ -9,6 +9,8 @@ $ETH stayed...", "tracking $ETH."). Penyebabnya tiga lapis:
 - cleaner cuma jalan kalau muncul >4 kali (post 4x lolos),
 - proofread step 9 selalu menambahkan "tracking $X." di akhir.
 """
+import json
+
 from generators.quality_gate import clean_redundant_symbol_references, proofread_post
 from prompts.rebate import REBATE_SYSTEM
 
@@ -24,6 +26,22 @@ price of $ETH stayed around $2235.54 despite the small -0.2% move, which seems m
 buyers continued showing up near current levels, and the reaction looks smaller than what might be expected after such volume.
 
 tracking $ETH."""
+
+
+# Same post trimmed to 2 $ETH mentions for the generate_post
+# end-to-end test: the quality gate now receives the symbol, so >2
+# cashtags are rejected (with one retry) instead of silently
+# cleaned; the cleaner still reduces 2 -> 1 here.
+USER_POST_E2E = """$ETH activity increased alongside the move.
+
+the advance held near $2235.54 with only a -0.2% dip and it didn't reverse quickly, which may suggest demand is real.
+
+$129.0M volume on $ETH is relatively high compared with recent sessions, so participants appear more engaged than usual.
+
+price of the token stayed around $2235.54 despite the small -0.2% move, which seems modest relative to the volume seen.
+
+buyers continued showing up near current levels, and the reaction looks smaller than what might be expected after such volume.
+"""
 
 
 def test_cleaner_user_post_four_mentions_become_one():
@@ -95,7 +113,18 @@ def test_build_prompt_orders_ticker_once_only():
 def test_generate_post_end_to_end_ticker_once(monkeypatch):
     from generators import post_generator
 
-    monkeypatch.setattr(post_generator, "generate", lambda *a, **k: USER_POST)
+    # Step 1: generate_post parses the reply as JSON; the drawn angle
+    # is fixed so the stub's echo is deterministic.
+    monkeypatch.setattr(post_generator, "next_opening_angle",
+                        lambda: ("participation", "Open with participation."))
+    monkeypatch.setattr(post_generator, "generate",
+                        lambda *a, **k: json.dumps({
+                            "event": "ETH moved",
+                            "fact": "-0.2% at $2235.54",
+                            "interpretation": "demand looks real",
+                            "angle": "participation",
+                            "post": USER_POST_E2E,
+                        }))
     monkeypatch.setattr(post_generator, "is_similar_to_recent", lambda c: False)
     monkeypatch.setattr(post_generator, "add_to_recent", lambda c: None)
     token = {
@@ -107,5 +136,5 @@ def test_generate_post_end_to_end_ticker_once(monkeypatch):
     }
     result = post_generator.generate_post(token, "HOT", {})
     assert result is not None
-    assert result.count("$ETH") == 1
-    assert result.startswith("$ETH")
+    assert result["post"].count("$ETH") == 1
+    assert result["post"].startswith("$ETH")

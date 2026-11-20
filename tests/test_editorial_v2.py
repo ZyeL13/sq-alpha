@@ -163,8 +163,11 @@ def test_prompt_carries_style_and_calibration():
 
     prompt = build_prompt(_token(), "GAINERS")
     assert "EDITORIAL STYLE: analytical" in prompt
-    assert "learn the voice, not the sentence structure" in prompt
-    assert "Forced Contrarianism" in prompt
+    # Trimmed calibration (step 1): short voice core, no example blocks.
+    assert "VOICE CALIBRATION" in prompt
+    assert "never manufacture controversy" in prompt
+    assert "crypto Twitter" not in prompt
+    assert "Forced Contrarianism" not in prompt
     # No verbatim template parts anymore.
     assert "HOOK - copy this as your FIRST LINE" not in prompt
     assert "ANGLE - use this as the basis" not in prompt
@@ -366,13 +369,18 @@ def test_validate_accepts_demo2_nova_post():
 
 # --- calibration content ---
 
-def test_calibration_covers_all_four_styles():
-    for name in ("Analytical Take", "Contrarian View", "Dry Humor", "Data Observation"):
-        assert name in VOICE_CALIBRATION
+def test_calibration_is_a_short_voice_core():
+    # Trimmed in step 1: ~4 short lines, no positive/negative example
+    # blocks, no "crypto Twitter" line (the only X/Threads reference).
+    assert "Analytical" in VOICE_CALIBRATION
+    assert "crypto Twitter" not in VOICE_CALIBRATION
+    assert len(VOICE_CALIBRATION) < 600
 
 
-def test_calibration_warns_against_memorizing_structure():
-    assert "not the sentence structure" in VOICE_CALIBRATION
+def test_calibration_states_voice_rules():
+    assert "Skepticism does not require disagreement" in VOICE_CALIBRATION
+    assert "never manufacture controversy" in VOICE_CALIBRATION
+    assert "honest observation" in VOICE_CALIBRATION
 
 
 def test_editorial_forbidden_covers_template_habits():

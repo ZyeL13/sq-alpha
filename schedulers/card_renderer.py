@@ -255,6 +255,54 @@ def _render_plain_image(token: dict, price: float, change: float,
     return img
 
 
+def assert_snapshot_for_card(snapshot) -> None:
+    """Guard the sketchnote card's inputs before drawing.
+
+    Raises CardRenderError (caller falls back to text-only, image
+    slot not consumed) when the snapshot disagrees with itself:
+    price outside the 24h range, closes not 24 finite positive
+    values, non-positive 7d average volume, or btc_relative that
+    does not recompute from btc_change within 0.01. The sparkline
+    is chronological by construction (closes = last 24 hourly
+    closes, oldest first); the length/finite checks are the guard,
+    not a reorder.
+    """
+    import math
+
+    token = snapshot.token
+    symbol = str(token.get("symbol") or "").strip()
+    try:
+        price = float(token.get("price"))
+        low = float(token.get("low_24h") or 0)
+        high = float(token.get("high_24h") or 0)
+    except (TypeError, ValueError):
+        raise CardRenderError(f"non-numeric range data for ${symbol}")
+    if high and low and high > low and not (low <= price <= high):
+        raise CardRenderError(
+            f"price ${price} outside 24h range "
+            f"${low}-${high} for ${symbol}")
+    closes = snapshot.closes or []
+    if len(closes) != 24 or not all(
+            isinstance(c, (int, float)) and math.isfinite(c) and c > 0
+            for c in closes):
+        raise CardRenderError(
+            f"closes must be 24 finite positive values for ${symbol}")
+    if not (snapshot.volume_7d_avg and snapshot.volume_7d_avg > 0):
+        raise CardRenderError(
+            f"non-positive volume_7d_avg for ${symbol}")
+    if snapshot.btc_relative is not None and snapshot.btc_change is not None:
+        try:
+            recomputed = (float(token.get("price_change_percent"))
+                          - snapshot.btc_change)
+        except (TypeError, ValueError):
+            recomputed = None
+        if recomputed is not None and abs(
+                recomputed - snapshot.btc_relative) > 0.01:
+            raise CardRenderError(
+                f"btc_relative mismatch for ${symbol}: stored "
+                f"{snapshot.btc_relative}, recomputed {recomputed}")
+
+
 def render_card(token: dict, output_dir: str | None = None,
                 *, snapshot=None, card_type=None, question=None,
                 style=None, reaction=None) -> str:
@@ -308,6 +356,7 @@ def render_card(token: dict, output_dir: str | None = None,
 
     try:
         if resolved == "sketchnote":
+            assert_snapshot_for_card(snapshot)
             card_data = build_card_data(snapshot, card_type, question,
                                         reaction)
             img = render_sketchnote_image(card_data)

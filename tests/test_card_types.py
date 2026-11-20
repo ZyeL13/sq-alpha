@@ -185,11 +185,12 @@ def test_extract_closing_question():
 
 
 # ------------------------------------------- generate_post explicit angle
+# Cites only numbers from _token(): -5.8% / $2.40 (the JSON validator
+# rejects any other unit-carrying number).
 POST_WITH_QUESTION = (
-    "$KITE volume ran 3.2x its 7-day average while price moved 12%. "
-    "Participation showed up before the move did, which is the part "
-    "worth noting. The advance held through the session without "
-    "giving much back.\n\n"
+    "$KITE slipped -5.8% to $2.40 while participation showed up before "
+    "the move did, which is the part worth noting. The drop held "
+    "through the session without much of a bounce.\n\n"
     "Does the tape stay this loud past the weekend?"
 )
 
@@ -201,7 +202,15 @@ def test_generate_post_explicit_angle_is_used_and_recorded(monkeypatch, tmp_path
 
     def fake_generate(prompt, **kwargs):
         seen["prompt"] = prompt
-        return POST_WITH_QUESTION
+        # Step 1: generate_post parses the reply as JSON; the drawn
+        # angle is the explicit opening_angle ("participation").
+        return json.dumps({
+            "event": "KITE moved",
+            "fact": "-5.8% to $2.40",
+            "interpretation": "participation showed up first",
+            "angle": "participation",
+            "post": POST_WITH_QUESTION,
+        })
 
     monkeypatch.setattr(post_generator, "generate", fake_generate)
     monkeypatch.setattr(post_generator, "is_similar_to_recent", lambda c: False)
@@ -212,7 +221,7 @@ def test_generate_post_explicit_angle_is_used_and_recorded(monkeypatch, tmp_path
         opening_angle=("participation", OPENING_ANGLES["participation"]),
         closing_question=True)
     assert result is not None
-    assert result.endswith("?")
+    assert result["post"].endswith("?")
     assert "who showed up" in seen["prompt"]  # the mapped instruction
     assert "End the post with a closing question" in seen["prompt"]
     with open(styles.ANGLE_STATE_FILE) as f:

@@ -203,3 +203,73 @@ def pick_winner(scores: list) -> int:
         if scores[i].total > scores[best].total:
             best = i
     return best
+
+
+# Class order for cited-number matching (same as _match_cited).
+_PCT_KEYS = ("change", "btc_change", "btc_relative")
+_DOLLAR_KEYS = ("price", "high", "low", "volume", "price_at_news",
+                "volume_at_news")
+_RATIO_KEYS = ("volume_ratio",)
+
+# Unicode minus/dash signs that read as "-" in a cited number.
+# 1:1 replacement, so offsets into the original content stay valid.
+_UNICODE_MINUS = str.maketrans({"−": "-", "–": "-", "—": "-"})
+
+
+def find_unmatched_numbers(content: str, numbers: dict) -> list:
+    """Unit-carrying numbers cited in `content` matching NO key in
+    `numbers` (the JSON validator's number check, spec §1.3/§2.3).
+
+    Reuses the module regexes, tolerances and class order of
+    `_match_cited`: percent-class keys for % matches, "volume_ratio"
+    for x- and vol-matches, dollar-class keys for $ matches (K/M/B
+    multiplier applied first). One cited number checks every key in
+    its class; it is unmatched only if it matches none of them.
+    Returns the cited strings as they appear (e.g. "+9.9%", "$5.55",
+    "7.7x"). Bare digits with no unit are ignored entirely.
+    """
+    if not content or not isinstance(content, str):
+        return []
+    numbers = numbers or {}
+    # Normalised copy for matching only; displays come from `content`.
+    normalized = content.translate(_UNICODE_MINUS)
+    unmatched = []
+    seen = set()
+
+    def _safe_close(closer, value, actual):
+        try:
+            return closer(value, actual)
+        except (TypeError, ValueError):
+            return False
+
+    def _record(match, value, keys, closer):
+        if value is None:
+            return
+        for key in keys:
+            if key in numbers and _safe_close(closer, value, numbers[key]):
+                return
+        display = content[match.start():match.end()].strip()
+        if display and display not in seen:
+            seen.add(display)
+            unmatched.append(display)
+
+    for m in _PCT_RE.finditer(normalized):
+        _record(m, _num(m.group(1)), _PCT_KEYS, _close_pct)
+    x_spans = []
+    for m in _X_RE.finditer(normalized):
+        x_spans.append((m.start(1), m.end(1)))
+        _record(m, _num(m.group(1)), _RATIO_KEYS, _close_pct)
+    for m in _DOLLAR_RE.finditer(normalized):
+        value = _num(m.group(1))
+        if value is None:
+            continue
+        suffix = (m.group(2) or "").upper()
+        value *= _MULTIPLIERS.get(suffix, 1.0)
+        _record(m, value, _DOLLAR_KEYS, _close_rel)
+    for m in _VOL_RE.finditer(normalized):
+        # "volume 3.2x" is already cited by the x pattern; do not
+        # report it a second time as a vol citation.
+        if any(s <= m.start(1) < e for s, e in x_spans):
+            continue
+        _record(m, _num(m.group(1)), _RATIO_KEYS, _close_pct)
+    return unmatched

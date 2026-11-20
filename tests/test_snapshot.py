@@ -108,3 +108,124 @@ def test_range_helpers_without_real_range():
     assert range_width_pct_of(token) is None
     assert range_position_of(_token(high_24h=0, low_24h=0,
                                     range_position=0.3)) == 0.3
+
+
+# ------------------------------------------------- step 1: to_dict / prompt dict
+def test_to_dict_omits_none_fields():
+    from schedulers.snapshot import CardSnapshot
+
+    snap = CardSnapshot(token=_token(), closes=[2.0] * 24,
+                        volume_7d_avg=1_000_000, btc_change=None)
+    d = snap.to_dict()
+    assert "btc_change" not in d
+    assert "btc_relative" not in d
+    assert d["symbol"] == "KITE"
+    assert d["price"] == 2.40
+    assert d["change_24h"] == -7.9
+    assert d["closes"] == [2.0] * 24
+    assert d["volume_ratio"] == pytest.approx(3.2)
+
+
+def test_to_dict_includes_btc_fields_when_present():
+    from schedulers.snapshot import CardSnapshot
+
+    snap = CardSnapshot(token=_token(), closes=[2.0] * 24,
+                        volume_7d_avg=1_000_000, btc_change=2.1)
+    d = snap.to_dict()
+    assert d["btc_change"] == 2.1
+    assert d["btc_relative"] == pytest.approx(-10.0)
+
+
+def test_snapshot_dict_for_prompt_token_only():
+    from schedulers.snapshot import snapshot_dict_for_prompt
+
+    d = snapshot_dict_for_prompt(_token())
+    assert d["symbol"] == "KITE"
+    assert d["change_24h"] == -7.9
+    assert d["btc_relative"] == pytest.approx(-10.0)
+    assert "closes" not in d  # sparkline data never reaches the prompt
+    token = _token()
+    del token["btc_change_24h"]
+    d = snapshot_dict_for_prompt(token)
+    assert "btc_change" not in d
+    assert "btc_relative" not in d
+
+
+def test_snapshot_dict_for_prompt_drops_closes():
+    from schedulers.snapshot import CardSnapshot, snapshot_dict_for_prompt
+
+    snap = CardSnapshot(token=_token(), closes=[2.0] * 24,
+                        volume_7d_avg=1_000_000, btc_change=2.1)
+    d = snapshot_dict_for_prompt(_token(), snap)
+    assert "closes" not in d
+    assert d["volume_7d_avg"] == 1_000_000
+    assert d["btc_relative"] == pytest.approx(-10.0)
+
+
+# ------------------------------------------------- step 1: card assertions
+def _snap_for_assert(**overrides):
+    from schedulers.snapshot import CardSnapshot
+
+    token = _token()
+    token.update(overrides.pop("token", {}))
+    return CardSnapshot(token=token, closes=overrides.pop("closes", [2.0] * 24),
+                        volume_7d_avg=overrides.pop("volume_7d_avg", 1_000_000),
+                        btc_change=overrides.pop("btc_change", 2.1))
+
+
+def test_card_assertions_pass_on_valid_snapshot():
+    from schedulers.card_renderer import assert_snapshot_for_card
+
+    assert_snapshot_for_card(_snap_for_assert())  # no raise
+
+
+def test_card_assertions_fail_price_outside_range():
+    from schedulers.card_renderer import CardRenderError, assert_snapshot_for_card
+
+    with pytest.raises(CardRenderError):
+        assert_snapshot_for_card(_snap_for_assert(token={"price": 9.99}))
+
+
+def test_card_assertions_fail_short_closes():
+    from schedulers.card_renderer import CardRenderError, assert_snapshot_for_card
+
+    with pytest.raises(CardRenderError):
+        assert_snapshot_for_card(_snap_for_assert(closes=[2.0] * 23))
+
+
+def test_card_assertions_fail_nonpositive_close():
+    from schedulers.card_renderer import CardRenderError, assert_snapshot_for_card
+
+    closes = [2.0] * 24
+    closes[5] = 0.0
+    with pytest.raises(CardRenderError):
+        assert_snapshot_for_card(_snap_for_assert(closes=closes))
+
+
+def test_card_assertions_fail_bad_volume_avg():
+    from schedulers.card_renderer import CardRenderError, assert_snapshot_for_card
+
+    with pytest.raises(CardRenderError):
+        assert_snapshot_for_card(_snap_for_assert(volume_7d_avg=0))
+
+
+def test_card_assertions_fail_btc_relative_mismatch():
+    from types import SimpleNamespace
+
+    from schedulers.card_renderer import CardRenderError, assert_snapshot_for_card
+
+    # btc_relative is a derived property on CardSnapshot, so a real
+    # snapshot can never disagree with itself — exercise the branch
+    # with a stand-in carrying a stored (wrong) value, which is all
+    # the assertion function ever reads.
+    snap = SimpleNamespace(
+        token=_token(), closes=[2.0] * 24, volume_7d_avg=1_000_000,
+        btc_change=2.1, btc_relative=-5.0)  # recomputed is -10.0
+    with pytest.raises(CardRenderError):
+        assert_snapshot_for_card(snap)
+    snap.btc_relative = -10.0
+    assert_snapshot_for_card(snap)  # no raise within tolerance
+    # Missing BTC context skips the check entirely.
+    snap.btc_change = None
+    snap.btc_relative = None
+    assert_snapshot_for_card(snap)

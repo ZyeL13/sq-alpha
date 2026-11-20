@@ -3,6 +3,8 @@ an optional reaction (replacing the angle) and a MEMORY block. The
 angle path stays byte-identical — the existing prompt tests guard it;
 these tests pin the reaction path's shape.
 """
+import json
+
 import generators.post_generator as pg
 from generators.post_generator import build_prompt, generate_post
 from generators.quality_gate import is_reasoning_leak
@@ -94,11 +96,16 @@ def test_generate_post_with_reaction_draws_no_angle(monkeypatch):
                         lambda name: (_ for _ in ()).throw(
                             AssertionError("angle record on reaction path")))
     monkeypatch.setattr(pg, "generate",
-                        lambda *a, **k: "$NOVA reacted. " + "x" * 120)
-    content = generate_post(_token(), "GAINERS", {},
-                            reaction=("smug", "SMUG INSTRUCTION"))
-    assert content is not None
-    assert content.startswith("$NOVA")
+                        lambda *a, **k: json.dumps({
+                            "event": "NOVA reacted",
+                            "fact": "+4.2% to $1.29",
+                            "interpretation": "buyers showed up",
+                            "angle": "smug",
+                            "post": "$NOVA reacted. " + "x" * 120}))
+    result = generate_post(_token(), "GAINERS", {},
+                           reaction=("smug", "SMUG INSTRUCTION"))
+    assert result is not None
+    assert result["post"].startswith("$NOVA")
 
 
 def test_generate_post_reaction_skips_insufficient_insight(monkeypatch):

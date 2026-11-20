@@ -19,6 +19,7 @@ GROQ_API_KEY       = os.getenv("GROQ_API_KEY")
 CMC_API_KEY        = os.getenv("CMC_API_KEY")
 DEEPSEEK_API_KEY   = os.getenv("DEEPSEEK_API_KEY")
 NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY")
+COARENA_API_KEY    = os.getenv("COARENA_API_KEY")
 
 # ========== PATHS ==========
 BASE_DIR = os.path.dirname(__file__)
@@ -109,6 +110,22 @@ LLM_PROVIDERS = {
         "enabled": True,
         "weight": 5.25,
     },
+    # Coarena gpt-6-luna — free tier ($1/day account allowance, shared
+    # with Dialectica; 10 req/min). Weight 7 puts Luna first, ahead of
+    # BlockRun (6) / Groq (5). Key goes in the VPS .env directly, never
+    # via chat (the Dialectica hsurr: surrogate path does not transfer
+    # to the VPS). Empty key -> skipped by _get_providers_by_priority.
+    "coarena_luna": {
+        "api_key": COARENA_API_KEY,
+        "api_url": "https://coarena.ai/api/v1/chat/completions",
+        "model": "gpt-6-luna",
+        "max_tokens": 1200,
+        "temperature": 0.5,
+        "top_p": 0.9,
+        "requests_per_minute": 10,
+        "enabled": True,
+        "weight": 7,
+    },
     # Groq Free plan (no card) — openai/gpt-oss-120b,
     # 30 RPM / 1,000 RPD / 200k tokens/day. llama-3.3-70b-versatile was
     # decommissioned by Groq on 2026-08-16 (404 model_not_found).
@@ -168,13 +185,12 @@ LLM_PROVIDERS = {
     },
 }
 
-# Category to preferred provider (tried first, then weight order)
-CATEGORY_PREFERRED = {
-    "HOT": "blockrun",
-    "ALPHA": "blockrun",
-    "GAINERS": "blockrun",
-    "LOSERS": "blockrun",
-}
+# Category to preferred provider (tried first, then weight order).
+# Step 1 (spec §5.2): emptied — the old HOT/ALPHA/GAINERS/LOSERS ->
+# "blockrun" entries would have kept BlockRun ahead of Luna (weight 7)
+# on every category, so weight order governs now. The name stays:
+# generate() reads it via .get(), so an empty dict is safe.
+CATEGORY_PREFERRED = {}
 
 # ========== POST MODE ==========
 POST_MODE = "rebate"
@@ -189,6 +205,23 @@ try:
     DAILY_POST_LIMIT = int(os.getenv("DAILY_POST_LIMIT", "10"))
 except ValueError:
     DAILY_POST_LIMIT = 10
+
+# Step 1 (spec §2.5): abstain when the best pool draft scores below
+# this. Starting value from a single dry-run pool; calibrate from
+# production DRAFT_SCORED lines, record changes in docs/experiments.md.
+try:
+    ABSTAIN_THRESHOLD = float(os.getenv("ABSTAIN_THRESHOLD", "50.0"))
+except ValueError:
+    ABSTAIN_THRESHOLD = 50.0
+
+# Step 1 (spec §5.4): max Coarena (Luna) calls sq-alpha makes per UTC
+# day. Call-count cap, not dollars — Luna's per-token price is not
+# published, so usage can't be priced at runtime. 100 = ~2x the
+# expected ~50 calls/day (pool 5 x 10 posts + retries).
+try:
+    COARENA_SQALPHA_DAILY_CALLS = int(os.getenv("COARENA_SQALPHA_DAILY_CALLS", "100"))
+except ValueError:
+    COARENA_SQALPHA_DAILY_CALLS = 100
 
 # ========== JIT SCHEDULING (draft pool) ==========
 # Kill switch: JIT_SCHEDULING=false restores the pre-JIT processor
@@ -309,6 +342,10 @@ ARTICLE_MAX_CHARS = 5000  # probe-tunable; Square's 20013 limit is unpublished
 # 600-900-word article; watch finish_reason=length, fall back to
 # short text when the article fails validation.
 LONGFORM_MAX_TOKENS = 3500
+
+# Step 1 experiment variable (spec §1.8): stamped into logs/posts.csv
+# so each row joins to its experiment row in docs/experiments.md.
+PROMPT_VERSION = "json-v1"
 
 # ========== CLOSER SETTINGS ==========
 CLOSER_ENABLED = False  # True untuk aktif, False untuk mati

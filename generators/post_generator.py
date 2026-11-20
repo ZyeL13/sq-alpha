@@ -1,7 +1,10 @@
 # generators/post_generator.py
+import json
 from typing import Dict, Any, Optional
+import llm
 from llm import generate
-from prompts.rebate import REBATE_SYSTEM
+from prompts.fewshot import load_fewshot_examples
+from prompts.rebate import REBATE_SYSTEM, REBATE_SYSTEM_CORE
 from prompts.styles import (
     STYLE_GUIDANCE,
     VOICE_CALIBRATION,
@@ -11,13 +14,23 @@ from prompts.styles import (
     record_angle_used,
     select_editorial_style,
 )
-from config import LONGFORM_MAX_TOKENS
+from config import LONGFORM_MAX_TOKENS, PROMPT_VERSION
+from generators.json_validate import parse_json_reply, validate_draft_json
 from generators.quality_gate import validate_post, validate_longform, is_similar_to_recent, clean_redundant_symbol_references, proofread_post
+from processors.draft_scoring import _token_numbers
 from storage.post_history import record_post as add_to_recent
 import logging_config
 import logging
 
 logger = logging_config.get_logger("post_generator")
+
+# Last successful generation, for the per-post CSV log (the
+# orchestrator reads it at schedule time): the drawn angle plus the
+# provider/model that actually answered (from llm.last_call_meta).
+# generate_longform resets the angle to None on success. Single
+# processor worker, so no race; a concurrent caller would overwrite
+# it (same known limitation as llm.last_call_meta).
+LAST_DRAFT_META: dict = {}
 
 # Setup audit logger
 audit_logger = logging.getLogger('post_audit')
@@ -122,7 +135,9 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
                  opening_angle: "tuple[str, str] | None" = None,
                  closing_question: bool = False,
                  reaction: "tuple[str, str] | None" = None,
-                 memory: "str | None" = None) -> str:
+                 memory: "str | None" = None,
+                 snapshot_dict: "dict | None" = None,
+                 avoid_openers: "list[str] | None" = None) -> str:
     """Build the user prompt for one post.
 
     Editorial v2: the style is selected from the token's own data
@@ -154,6 +169,14 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
     storage/memory_store.format_memory_block) describing the last
     post about this token, or None. It is appended to the DATA
     section so reactions may draw on it; it is never required.
+
+    Step 1 (JSON output): the prompt carries the snapshot as JSON
+    (cite ONLY numbers from it), the 5 most recent scheduled openers
+    as an avoid-list, a 2-good/1-bad few-shot subset for the drawn
+    reaction (pooled across reactions on the flag-off path), and the
+    JSON instruction. The system prompt (REBATE_SYSTEM_CORE) stays
+    format-agnostic — the JSON contract lives here, in the user
+    prompt, so Luna never sees conflicting format demands.
     """
     symbol = token["symbol"]
     data_section = _data_section(token)
@@ -161,6 +184,7 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
         data_section += f"\nMEMORY: {memory}"
 
     style = select_editorial_style(token, scores)
+    reaction_name = reaction[0] if reaction is not None else None
     if reaction is not None:
         _, reaction_text = reaction
         opening_block = (
@@ -179,8 +203,9 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
         person_rule = ("- First person (\"I\") is allowed ONLY AFTER the cashtag in the "
                        "opening line, never as the first word. No \"we\", no "
                        "\"you\" anywhere; the rest of the post stays third-person.")
+        drawn_angle = reaction_name
     else:
-        _, angle_text = opening_angle or next_opening_angle()
+        angle_name, angle_text = opening_angle or next_opening_angle()
         opening_block = (
             f"OPENING ANGLE: {angle_text}\n"
             "The first line decides whether the reader stops scrolling. Follow the\n"
@@ -189,6 +214,7 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
             "angle, do not bolt a price sentence in front of it."
         )
         person_rule = "- No first or second person: no \"i\", \"we\", \"you\"."
+        drawn_angle = angle_name
     if closing_question:
         ending_rule = ("- End the post with a closing question: the question "
                        "the observation raises. It must be the last sentence "
@@ -197,6 +223,72 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
         ending_rule = ("- End where the observation ends. No forced closing line, "
                        "no forced question, no \"watching from here\" style sign-off.")
 
+    # SNAPSHOT JSON: the numbers the post may cite, and only those.
+    # A missing field means that comparison is unavailable — the
+    # prompt says so plainly instead of letting the model invent it.
+    snapshot_block = ""
+    if snapshot_dict:
+        snapshot_block = (
+            "\nSNAPSHOT (JSON — cite ONLY numbers from here):\n"
+            f"{json.dumps(snapshot_dict, sort_keys=True)}")
+        missing = []
+        if "btc_change" not in snapshot_dict:
+            missing.append("BTC 24h change is unavailable — do not mention "
+                           "any BTC comparison.")
+        if "volume_ratio" not in snapshot_dict:
+            missing.append("Volume vs 7-day average is unavailable — do not "
+                           "mention it.")
+        if "range_position" not in snapshot_dict:
+            missing.append("Position in the 24h range is unavailable — do "
+                           "not mention it.")
+        if missing:
+            snapshot_block += "\n" + " ".join(missing)
+
+    # AVOID-LIST: first lines of the most recent scheduled posts.
+    avoid_block = ""
+    if avoid_openers:
+        lines = []
+        for text in avoid_openers[:5]:
+            first = (text or "").split("\n")[0].strip()
+            if first:
+                lines.append(f"- {first}")
+        if lines:
+            avoid_block = (
+                "\nAVOID THESE OPENERS — the last scheduled posts opened "
+                "this way; do not repeat their first lines:\n"
+                + "\n".join(lines))
+
+    # FEW-SHOT: 2 good + 1 bad for the drawn reaction (pooled across
+    # reactions on the flag-off path, where there is no reaction).
+    fewshot_block = ""
+    examples = load_fewshot_examples(reaction_name)
+    good = [post for kind, post in examples if kind == "good"]
+    bad = [post for kind, post in examples if kind == "bad"]
+    if good or bad:
+        parts = ["\nEXAMPLES — follow the good ones' voice and shape, "
+                 "never copy their wording:"]
+        if good:
+            parts.append("GOOD EXAMPLES:")
+            parts += [f"{i}. {post}" for i, post in enumerate(good, 1)]
+        if bad:
+            parts.append("BAD EXAMPLES — do not do this:")
+            parts += [f"{i}. {post}" for i, post in enumerate(bad, 1)]
+        fewshot_block = "\n".join(parts)
+
+    json_instruction = (
+        "Reply with a single JSON object and nothing else:\n"
+        '{"event": "<what happened, one sentence>", '
+        '"fact": "<the key number(s) from the SNAPSHOT>", '
+        '"interpretation": "<why it may matter, one or two sentences>", '
+        f'"angle": "{drawn_angle}", '
+        '"post": "<the post>"}'
+        f"\nRules for the JSON: \"angle\" MUST be exactly \"{drawn_angle}\". "
+        f"\"post\" is 40-90 words, MUST begin with ${symbol} as the very "
+        "first characters, exactly one cashtag in the first line; afterwards "
+        "refer to \"the token\". Cite ONLY numbers from the SNAPSHOT above "
+        "(MEMORY is context, not citable numbers). Do not wrap the post in "
+        "tags, no markdown fences, no prose outside the JSON object.")
+
     prompt = f"""You are writing a short market observation post for Binance Square.
 
 GOAL: Make the reader curious enough to check ${symbol}'s chart.
@@ -204,7 +296,7 @@ GOAL: Make the reader curious enough to check ${symbol}'s chart.
 {opening_block}
 
 DATA:
-{data_section}
+{data_section}{snapshot_block}{avoid_block}{fewshot_block}
 
 EDITORIAL STYLE: {style}
 {STYLE_GUIDANCE[style]}
@@ -221,7 +313,7 @@ RULES:
 - Observable facts first, interpretation second.
 - Explain why the behavior may matter.
 - Compare the move to normal market behavior when relevant.
-- Short by default (40-120 words). Longer only when the observation
+- Short by default (40-90 words). Longer only when the observation
   needs the room; never pad to fill space.
 - Separate paragraphs with ONE blank line. Never write large text blocks.
 - Paragraph count and lengths must vary; do not fall into a fixed shape.
@@ -232,7 +324,7 @@ RULES:
 - Refer to the token as ${symbol} (with $ prefix, uppercase) exactly ONCE, in the first line. In every later sentence use "the token" — never repeat the cashtag.
 {person_rule}
 
-Write the post inside <post> tags. Nothing outside the tags."""
+{json_instruction}"""
     return prompt
 
 
@@ -357,6 +449,16 @@ def generate_longform(token: Dict[str, Any], category: str, scores: Dict[str, fl
 
     add_to_recent(title + "\n\n" + body)
 
+    # Long-form carries no opener angle: reset LAST_DRAFT_META so a
+    # later schedule-time read cannot pick up a stale short-form angle.
+    meta = llm.last_call_meta or {}
+    LAST_DRAFT_META.clear()
+    LAST_DRAFT_META.update({
+        "angle": None,
+        "provider": meta.get("provider") or "",
+        "model": meta.get("model") or "",
+    })
+
     audit_logger.info(f"GENERATED_LONGFORM|{symbol}|{category}|{len(body)}_chars")
     return title, body
 
@@ -384,7 +486,21 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
                   opening_angle: "tuple[str, str] | None" = None,
                   closing_question: bool = False,
                   reaction: "tuple[str, str] | None" = None,
-                  memory: "str | None" = None) -> Optional[str]:
+                  memory: "str | None" = None,
+                  snapshot=None, snapshot_dict: "dict | None" = None,
+                  avoid_openers: "list[str] | None" = None,
+                  card_type: "str | None" = None) -> Optional[dict]:
+    """Generate one short-form post as a JSON dict.
+
+    Returns {"event", "fact", "interpretation", "angle", "post"} or
+    None. Only "post" is published; the other fields are the LLM's
+    structured reasoning (logged, never posted). The reply is
+    parsed + validated in code (JSON shape, angle echo, numbers vs
+    snapshot, forbidden phrases, quality gate); one retry on
+    validation failure, then the draft is skipped. Long-form keeps
+    the old <post>-tag flow (generate_longform) — this function is
+    short-form only.
+    """
     # Quality over quota: skip before any LLM call when there is
     # genuinely nothing to observe. The reason is audit-logged so the
     # skip rate can be evaluated (Editorial v2 KPI).
@@ -411,39 +527,74 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
     else:
         angle_name, angle_text = opening_angle
         record_angle_used(angle_name)
+    drawn_angle = reaction_name or angle_name
+
     prompt = build_prompt(token, category, scores,
                           opening_angle=opening_angle,
                           closing_question=closing_question,
-                          reaction=reaction, memory=memory)
-    content = generate(prompt, system_prompt=REBATE_SYSTEM, category=category)
+                          reaction=reaction, memory=memory,
+                          snapshot_dict=snapshot_dict,
+                          avoid_openers=avoid_openers)
+    numbers = _token_numbers(token, snapshot)
+    symbol = token["symbol"]
 
-    if not content or not isinstance(content, str):
-        # AUDIT LOG: Gagal generate dari LLM
-        audit_logger.warning(f"GENERATE_FAILED|{token['symbol']}|{category}|no_content")
+    # Validation loop: at most 2 attempts (1 call + 1 retry). The
+    # first failure stops the pipeline and triggers the retry with
+    # a note naming the failure; after the second failure the draft
+    # is skipped, never posted.
+    parsed = None
+    post = None
+    last_reason = None
+    current_prompt = prompt
+    for attempt in (1, 2):
+        content = generate(current_prompt, system_prompt=REBATE_SYSTEM_CORE,
+                           category=category, output_format="json",
+                           max_tokens=1200)
+        if not content or not isinstance(content, str):
+            audit_logger.warning(f"GENERATE_FAILED|{symbol}|{category}|no_content")
+            return None
+        parsed = parse_json_reply(content)
+        if parsed is None:
+            last_reason = "json_invalid"
+            detail = "json_invalid"
+        else:
+            ok, reason = validate_draft_json(parsed, drawn_angle, numbers,
+                                             symbol=symbol)
+            if not ok:
+                last_reason = reason
+                detail = reason
+            else:
+                candidate = parsed["post"]
+                valid, result = validate_post(candidate, symbol=symbol)
+                if not valid:
+                    last_reason = "quality_gate"
+                    detail = result
+                else:
+                    post = result.strip()
+                    break
+        audit_logger.info(
+            f"VALIDATION_FAILED|{symbol}|{category}|reason={last_reason}|attempt={attempt}")
+        if attempt == 1:
+            current_prompt = (
+                prompt + "\n\nYour previous reply failed validation: "
+                f"{detail}. Fix ONLY that and reply with the JSON object again.")
+    if post is None:
+        audit_logger.info(f"GENERATE_FAILED|{symbol}|{category}|reason={last_reason}")
         return None
-    
-    # Quality validation
-    valid, result = validate_post(content)
-    if not valid:
-        logger.warning(f"Quality gate REJECTED for ${token['symbol']}: {result}")
-        # AUDIT LOG: Reject karena quality gate
-        audit_logger.info(f"REJECTED|{token['symbol']}|{category}|{result}")
-        return None
-    
-    content = result.strip()
-    
+
+    content = post
+
     if len(content) < 50:
         print(f"  🚫 Post too short ({len(content)} chars)")
-        audit_logger.info(f"REJECTED|{token['symbol']}|{category}|too_short_{len(content)}_chars")
+        audit_logger.info(f"REJECTED|{symbol}|{category}|too_short_{len(content)}_chars")
         return None
 
     # Add $SYMBOL temporarily if missing (so cleaner can detect it)
-    symbol = token['symbol']
     if symbol.upper() not in content.upper():
         content = f"${symbol} " + content
 
     # CLEAN REDUNDANT SYMBOL REFERENCES
-    
+
     content = clean_redundant_symbol_references(content, symbol)
     content = proofread_post(content, symbol)
 
@@ -457,14 +608,30 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
     if is_similar_to_recent(content):
         print("  🔄 Post too similar to recent, skipping...")
         return None
-    
+
     # Add to recent posts
     add_to_recent(content)
 
-    # AUDIT LOG: Post berhasil di-generate
-    if reaction_name is not None:
-        audit_logger.info(f"GENERATED|{symbol}|{category}|{len(content)}_chars|reaction={reaction_name}")
-    else:
-        audit_logger.info(f"GENERATED|{symbol}|{category}|{len(content)}_chars|angle={angle_name}")
+    # LAST_DRAFT_META: the drawn angle + the provider/model that
+    # actually answered, for the per-post CSV log at schedule time.
+    meta = llm.last_call_meta or {}
+    LAST_DRAFT_META.clear()
+    LAST_DRAFT_META.update({
+        "angle": drawn_angle,
+        "provider": meta.get("provider") or "",
+        "model": meta.get("model") or "",
+    })
 
-    return content
+    # AUDIT LOG: Post berhasil di-generate
+    extra = (f"|card_type={card_type or 'none'}"
+             f"|model={LAST_DRAFT_META['model']}"
+             f"|provider={LAST_DRAFT_META['provider']}"
+             f"|prompt_version={PROMPT_VERSION}")
+    if reaction_name is not None:
+        audit_logger.info(f"GENERATED|{symbol}|{category}|{len(content)}_chars|reaction={reaction_name}{extra}")
+    else:
+        audit_logger.info(f"GENERATED|{symbol}|{category}|{len(content)}_chars|angle={angle_name}{extra}")
+
+    return {"event": parsed["event"], "fact": parsed["fact"],
+            "interpretation": parsed["interpretation"],
+            "angle": parsed["angle"], "post": content}

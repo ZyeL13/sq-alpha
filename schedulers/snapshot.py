@@ -87,6 +87,65 @@ class CardSnapshot:
     def range_width_pct(self):
         return range_width_pct_of(self.token)
 
+    def to_dict(self) -> dict:
+        """Plain-dict view of the snapshot: the same numbers feed the
+        prompt, the number validator, and the card — no second fetch,
+        no drift. Fields whose value is None are omitted, so the
+        prompt can say 'do not mention that comparison' for missing
+        data (spec 2.4)."""
+        d = {
+            "symbol": self.token.get("symbol"),
+            "price": self.token.get("price"),
+            "change_24h": self.token.get("price_change_percent"),
+            "volume_24h": self.token.get("volume_24h"),
+            "high": self.token.get("high_24h"),
+            "low": self.token.get("low_24h"),
+            "volume_ratio": self.volume_ratio,
+            "volume_7d_avg": self.volume_7d_avg,
+            "range_position": self.range_position,
+            "range_width_pct": self.range_width_pct,
+            "btc_change": self.btc_change,
+            "btc_relative": self.btc_relative,
+            "closes": list(self.closes),
+        }
+        return {k: v for k, v in d.items() if v is not None}
+
+
+def snapshot_dict_for_prompt(token: dict, snapshot: "CardSnapshot | None" = None) -> dict:
+    """The prompt's SNAPSHOT JSON section: one dict for the prompt,
+    the number validator, and the card. From the CardSnapshot when
+    present, else from the token's own numbers. Omits None fields.
+    The 24 closes are dropped: they are sparkline data, and a close
+    cited in the post would fail number validation (the validator
+    only knows the token's own numbers) — so the prompt never
+    invites the model to cite one."""
+    if snapshot is not None:
+        d = snapshot.to_dict()
+    else:
+        d = {
+            "symbol": token.get("symbol"),
+            "price": token.get("price"),
+            "change_24h": token.get("price_change_percent"),
+            "volume_24h": token.get("volume_24h"),
+            "high": token.get("high_24h"),
+            "low": token.get("low_24h"),
+            "volume_ratio": token.get("volume_ratio_7d"),
+            "volume_7d_avg": token.get("volume_7d_avg"),
+            "range_position": range_position_of(token),
+            "range_width_pct": range_width_pct_of(token),
+            "btc_change": token.get("btc_change_24h"),
+        }
+        chg = d.get("change_24h")
+        btc = d.get("btc_change")
+        if chg is not None and btc is not None:
+            try:
+                d["btc_relative"] = float(chg) - float(btc)
+            except (TypeError, ValueError):
+                pass
+        d = {k: v for k, v in d.items() if v is not None}
+    d.pop("closes", None)
+    return d
+
 
 def build_snapshot(token: dict, fetch=fetch_klines):
     """Fetch klines168 once and bundle the snapshot, or None.

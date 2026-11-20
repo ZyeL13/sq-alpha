@@ -9,7 +9,12 @@ import pytest
 
 import llm
 import schedulers.orchestrator as orch
+import storage.posts_csv as posts_csv
 from storage.scheduled_post_queue import ScheduledPostQueue
+
+# The real prepare_draft, saved before the harness fixture stubs it —
+# the validation-retry tests need the real draft path.
+_REAL_PREPARE_DRAFT = orch.prepare_draft
 
 
 class _FakeQueue:
@@ -95,7 +100,7 @@ def _harness(tmp_path, monkeypatch):
     monkeypatch.setattr(orch, "score_token", _score_token)
 
     def _prepare(token, category, scores, reaction=None, memory=None,
-                 total_score=0.0):
+                 total_score=0.0, avoid_openers=None):
         ns.draft_calls.append(token["symbol"])
         behavior = ns.prepare_behavior.get(token["symbol"], "draft")
         if behavior == "fail_429":
@@ -124,6 +129,10 @@ def _harness(tmp_path, monkeypatch):
                         lambda a, s: ns.news_marked.append((a, s)))
     monkeypatch.setattr(orch, "increment_format_count",
                         lambda fmt: ns.formats_incremented.append(fmt))
+    # _schedule_winner writes logs/posts.csv for real — point it at
+    # a tmp file so the pool tests never touch the repo logs.
+    monkeypatch.setattr(posts_csv, "POSTS_CSV_PATH",
+                        str(tmp_path / "posts.csv"))
     return ns
 
 
@@ -274,7 +283,7 @@ def test_stale_catalyst_stripped_before_draft(_harness, monkeypatch):
     seen = {}
 
     def _prepare(token, category, scores, reaction=None, memory=None,
-                 total_score=0.0):
+                 total_score=0.0, avoid_openers=None):
         seen["catalyst"] = token.get("news_catalyst")
         seen["stubs"] = token.get("news_article_keys")
         return orch.Draft(content=_content(token["symbol"]), fmt="short",
@@ -341,3 +350,75 @@ def test_get_recent_scheduled_posts_newest_first(_harness):
     assert len(_harness.queue.get_recent_scheduled_posts(10)) == 3
     assert _harness.queue.get_recent_scheduled_posts(5) == [
         "post C", "post B", "post A"]
+
+
+# ------------------------------------------------- step 1: abstain threshold
+def test_abstain_when_best_draft_below_threshold(_harness, monkeypatch):
+    # Signal 0.1 -> 4.5; specificity 22.5 (3 cited numbers); freshness
+    # 0 (each opener repeats a seeded scheduled post) -> best 27 < 50.
+    _harness.totals = {"AAA": 0.1, "BBB": 0.1, "CCC": 0.1}
+    now = time.time()
+    for i, sym in enumerate(["AAA", "BBB", "CCC"]):
+        _harness.queue.add_post(post=_content(sym), category="GAINERS",
+                                symbol=sym, scheduled_time=now + 100 + i)
+    assert _run(_harness, ["AAA", "BBB", "CCC"], monkeypatch,
+                buffer_max=5) is False
+    assert _harness.queue.get_post_count() == 3  # only the seeds
+    assert _harness.finalize_calls == []
+
+
+def test_no_abstain_when_best_draft_above_threshold(_harness, monkeypatch):
+    # Signal 0.3 -> 13.5; specificity 22.5; freshness 25 -> 61 >= 50.
+    _harness.totals = {"AAA": 0.3, "BBB": 0.3, "CCC": 0.3}
+    assert _run(_harness, ["AAA", "BBB", "CCC"], monkeypatch) is True
+    assert _harness.queue.get_post_count() == 1
+
+
+# ------------------------------------------------- step 1: validation retry
+def _real_draft_harness(_harness, monkeypatch, replies):
+    """Real prepare_draft + stubbed llm.generate (in post_generator's
+    namespace). Returns the list of prompts the fake generate saw."""
+    import generators.post_generator as pg
+
+    calls = []
+
+    def fake_generate(prompt, system_prompt=None, category=None, **kwargs):
+        calls.append(prompt)
+        return replies.pop(0) if replies else None
+
+    monkeypatch.setattr(pg, "generate", fake_generate)
+    monkeypatch.setattr(orch, "prepare_draft", _REAL_PREPARE_DRAFT)
+    monkeypatch.setattr(orch, "select_post_format", lambda *a, **k: "short")
+    monkeypatch.setattr(orch, "get_format_counts", lambda: {})
+    return calls
+
+
+def _valid_reply(symbol):
+    import json
+
+    return json.dumps({
+        "event": f"{symbol} jumped",
+        "fact": "+4.2% to $1.35, volume 3.2x",
+        "interpretation": "buyers are showing up",
+        "angle": "smug",
+        "post": _content(symbol),
+    })
+
+
+def test_pool_validation_retry_schedules_after_fix(_harness, monkeypatch):
+    calls = _real_draft_harness(
+        _harness, monkeypatch, ["not json at all", _valid_reply("AAA")])
+    assert _run(_harness, ["AAA"], monkeypatch, pool_size=1) is True
+    assert _harness.queue.get_post_count() == 1
+    assert len(calls) == 2
+    assert "failed validation: json_invalid" in calls[1]
+    rows = _harness.queue.get_recent_scheduled_posts(5)
+    assert rows[0] == _content("AAA")
+
+
+def test_pool_second_validation_failure_skips_draft(_harness, monkeypatch):
+    calls = _real_draft_harness(
+        _harness, monkeypatch, ["nope", "still nope"])
+    assert _run(_harness, ["AAA"], monkeypatch, pool_size=1) is False
+    assert _harness.queue.get_post_count() == 0
+    assert len(calls) == 2  # one retry, then the draft is skipped
