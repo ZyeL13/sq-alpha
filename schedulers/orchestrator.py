@@ -20,16 +20,25 @@ from processors.classify import classify
 from processors.score import score_token
 from processors.dedupe import is_duplicate, mark_posted, clear_old_entries
 from processors.draft_scoring import pick_winner, score_draft
-from prompts.styles import card_type_angle, select_card_type, select_post_format
+from prompts.styles import (
+    card_type_angle,
+    derive_stance,
+    select_card_type,
+    select_post_format_with_reason,
+    verb_for_change,
+)
 from prompts.reactions import advance_variant, draw_reaction, record_reaction_used
 from generators import post_generator as _post_gen
 from generators.post_generator import extract_closing_question, generate_longform, generate_post
+from schedulers import banner as _banner
+from schedulers import experiment as _experiment
 from schedulers.card_renderer import CardRenderError, render_card
 from schedulers.snapshot import CardSnapshot, build_snapshot, snapshot_dict_for_prompt
 from schedulers.poster import post_to_targets
 from storage.format_counter import get_format_counts, increment_format_count
 from storage.posts_csv import append_post_row
 from config import (
+    ARTICLE_PROMPT_VERSION,
     PROCESSOR_WORKERS,
     COINGECKO_ENABLED,
     WIB,
@@ -42,7 +51,14 @@ from config import (
     ABSTAIN_THRESHOLD,
     PROMPT_VERSION,
 )
-from schedulers.timing import get_post_delay, get_current_session
+from schedulers.timing import (
+    clamp_to_experiment_window,
+    experiment_window_active,
+    get_post_delay,
+    get_current_session,
+    in_experiment_window,
+    next_experiment_window_start,
+)
 from storage.post_counter import can_post, DAILY_POST_LIMIT, get_today_posts, get_seconds_until_reset
 import logging_config
 from storage.persistent_queue import PersistentQueue
@@ -284,10 +300,22 @@ class Draft:
     card_type: "str | None" = None
     reaction: "str | None" = None
     angle: "str | None" = None  # drawn angle/reaction echoed by the LLM (JSON "angle")
+    article_json: "dict | None" = None  # validated article JSON (longform only)
+    research_pack: "dict | None" = None  # research pack (longform only)
+    # Experiment day plan (worker C): the mode that produced this
+    # draft, the visual the day plan asked for ("banner" / "chart" /
+    # "annotated chart" / "sketchnote card", or "none" when the visual
+    # could not be built), and the plan's hypothesis / variable, for
+    # the CSV row. All None/"" when the experiment is inactive.
+    mode: "str | None" = None
+    visual: "str | None" = None
+    hypothesis: str = ""
+    variable_tested: str = ""
 
 
 def prepare_draft(token, category, scores, reaction=None, memory=None,
-                  total_score=0.0, avoid_openers=None):
+                  total_score=0.0, avoid_openers=None, mode=None,
+                  day_plan=None):
     """Decide the format, generate once. No rendering.
 
     The format is decided BEFORE generation (spec section 7: no
@@ -314,10 +342,42 @@ def prepare_draft(token, category, scores, reaction=None, memory=None,
     generate_post returns the JSON dict; this function unwraps the
     "post" field into Draft.content and the echoed "angle" into
     Draft.angle.
+
+    Experiment (worker C): `day_plan` is the dict from
+    experiment.current_day_plan (None when inactive) and `mode` its
+    mode (derived from the plan when not passed). When a plan is
+    present: deep-signal forces the longform path with
+    require_question=True; pulse/contrarian/onchain go through
+    generate_post(mode=mode) with closing_question=True; a short
+    draft whose visual requires an image is forced through the
+    snapshot + card-type selection exactly as the fmt=="image" path
+    does (snapshot/card-type unavailable -> short text, visual
+    "none", IMAGE_FALLBACK). When day_plan is None every mode
+    branch is skipped and behaviour is byte-identical to today.
     """
-    fmt = select_post_format(token, category, scores, get_format_counts())
+    fmt, justification = select_post_format_with_reason(
+        token, category, scores, get_format_counts())
     symbol = token.get("symbol", "?")
     snapshot = None
+
+    # Experiment plan: mode + visual + the CSV fields. mode defaults
+    # to the plan's mode; visual is the plan's visual until a
+    # fallback records "none".
+    visual = None
+    hypothesis = ""
+    variable_tested = ""
+    if day_plan is not None:
+        visual = day_plan.get("visual")
+        if mode is None:
+            mode = day_plan.get("mode")
+        hypothesis = day_plan.get("hypothesis", "") or ""
+        variable_tested = day_plan.get("variable_tested", "") or ""
+        if mode == "deep-signal":
+            fmt = "longform"
+        elif mode in ("pulse", "contrarian", "onchain") \
+                and fmt == "longform":
+            # The day's format is a short mode, never long-form.
+            fmt = "short"
 
     card_type = None
     if fmt == "image":
@@ -329,6 +389,8 @@ def prepare_draft(token, category, scores, reaction=None, memory=None,
             print(f"  ⚠️ No klines for ${symbol}, falling back to short text")
             audit_logger.info(f"IMAGE_FALLBACK|{symbol}|klines_failed")
             fmt = "short"
+            if day_plan is not None:
+                visual = "none"
         else:
             # The card type is decided BEFORE generation and drives
             # the text (mapped opening angle + closing question on
@@ -344,33 +406,108 @@ def prepare_draft(token, category, scores, reaction=None, memory=None,
                 print(f"  ⚠️ No card type for ${symbol}, falling back to short text")
                 audit_logger.info(f"IMAGE_FALLBACK|{symbol}|no_card_type")
                 fmt = "short"
+                if day_plan is not None:
+                    visual = "none"
+    elif (day_plan is not None and fmt == "short"
+            and visual in _experiment.IMAGE_VISUALS):
+        # Forced image: the day plan's visual needs a card/banner,
+        # so a short draft goes through the same snapshot +
+        # card-type selection as the fmt=="image" path. Unavailable
+        # snapshot/card type -> short text, visual "none".
+        snapshot = build_snapshot(token)
+        if snapshot is None:
+            print(f"  ⚠️ No klines for ${symbol}, falling back to short text")
+            audit_logger.info(f"IMAGE_FALLBACK|{symbol}|klines_failed")
+            visual = "none"
+        else:
+            card_type = select_card_type(
+                change=token.get("price_change_percent", 0) or 0,
+                volume_ratio=snapshot.volume_ratio,
+                range_width_pct=snapshot.range_width_pct,
+                range_position=snapshot.range_position,
+                btc_relative=snapshot.btc_relative)
+            if card_type is None:
+                print(f"  ⚠️ No card type for ${symbol}, falling back to short text")
+                audit_logger.info(f"IMAGE_FALLBACK|{symbol}|no_card_type")
+                visual = "none"
+            else:
+                fmt = "image"
 
     reaction_name = reaction[0] if reaction else None
 
     if fmt == "longform":
-        result = generate_longform(token, category, scores)
+        # The snapshot is built for long-form too: the research pack
+        # needs it, and the banner needs its closes. Klines failure
+        # -> snapshot None: the article still generates (the pack
+        # marks the snapshot fields missing) and finalize publishes
+        # coverless. The justification is the editorial angle the
+        # pack carries; memory is the pre-formatted MEMORY block.
+        snapshot = build_snapshot(token)
+        result = generate_longform(token, category, scores,
+                                   snapshot=snapshot,
+                                   justification=justification,
+                                   memory=memory,
+                                   require_question=(mode == "deep-signal"))
         if result is None:
             print(f"  ⚠️ Long-form failed for ${symbol}, falling back to short text")
             audit_logger.info(f"LONGFORM_FALLBACK|{symbol}|{category}|generate_failed")
             fmt = "short"
+            # Experiment fallback: the day's visual still needs an
+            # image when the snapshot supports one; otherwise the
+            # fallback is short text and the visual records "none".
+            fallback_card_type = None
+            fallback_closing_question = False
+            if (day_plan is not None
+                    and visual in _experiment.IMAGE_VISUALS):
+                if snapshot is None:
+                    print(f"  ⚠️ No klines for ${symbol}, falling back to short text")
+                    audit_logger.info(f"IMAGE_FALLBACK|{symbol}|klines_failed")
+                    visual = "none"
+                else:
+                    fallback_card_type = select_card_type(
+                        change=token.get("price_change_percent", 0) or 0,
+                        volume_ratio=snapshot.volume_ratio,
+                        range_width_pct=snapshot.range_width_pct,
+                        range_position=snapshot.range_position,
+                        btc_relative=snapshot.btc_relative)
+                    if fallback_card_type is None:
+                        print(f"  ⚠️ No card type for ${symbol}, falling back to short text")
+                        audit_logger.info(f"IMAGE_FALLBACK|{symbol}|no_card_type")
+                        visual = "none"
+                    else:
+                        fmt = "image"
+                        fallback_closing_question = True
             snapshot_dict = snapshot_dict_for_prompt(token, snapshot)
             generated = generate_post(token, category, scores,
                                       reaction=reaction, memory=memory,
                                       snapshot=snapshot, snapshot_dict=snapshot_dict,
                                       avoid_openers=avoid_openers,
-                                      card_type=card_type)
+                                      card_type=fallback_card_type,
+                                      closing_question=fallback_closing_question)
             if generated is None:
                 return None
             return Draft(content=generated["post"], fmt=fmt, title=None, token=token,
                          category=category, scores=scores,
                          total_score=total_score, reaction=reaction_name,
-                         angle=generated.get("angle") or reaction_name)
+                         angle=generated.get("angle") or reaction_name,
+                         snapshot=snapshot, card_type=fallback_card_type,
+                         mode=mode, visual=visual,
+                         hypothesis=hypothesis,
+                         variable_tested=variable_tested)
         title, content = result
         # Long-form articles carry no opener reaction; the tentative
         # draw (if any) is discarded with the draft's reaction slot.
+        # The validated article JSON + research pack ride on the
+        # Draft for finalize_draft (banner) and the CSV record.
+        meta = _post_gen.LAST_DRAFT_META
         return Draft(content=content, fmt=fmt, title=title, token=token,
                      category=category, scores=scores,
-                     total_score=total_score)
+                     total_score=total_score, snapshot=snapshot,
+                     article_json=meta.get("article"),
+                     research_pack=meta.get("research_pack"),
+                     mode=mode, visual=visual,
+                     hypothesis=hypothesis,
+                     variable_tested=variable_tested)
 
     # Image posts generate from the snapshot-enriched token copy so
     # the prompt carries the same derived numbers the card shows,
@@ -388,6 +525,10 @@ def prepare_draft(token, category, scores, reaction=None, memory=None,
         if reaction is None:
             opening_angle = card_type_angle(card_type)
         closing_question = True
+    # Experiment short modes always end with the closing question
+    # (the mode instruction + question gate in generate_post).
+    if mode in ("pulse", "contrarian", "onchain"):
+        closing_question = True
 
     snapshot_dict = snapshot_dict_for_prompt(gen_token, snapshot)
     generated = generate_post(gen_token, category, scores,
@@ -396,14 +537,19 @@ def prepare_draft(token, category, scores, reaction=None, memory=None,
                               reaction=reaction, memory=memory,
                               snapshot=snapshot, snapshot_dict=snapshot_dict,
                               avoid_openers=avoid_openers,
-                              card_type=card_type)
+                              card_type=card_type,
+                              mode=(mode if mode in ("pulse", "contrarian",
+                                                    "onchain") else None))
     if generated is None:
         return None
     return Draft(content=generated["post"], fmt=fmt, title=None, token=token,
                  category=category, scores=scores, total_score=total_score,
                  snapshot=snapshot, card_type=card_type,
                  reaction=reaction_name,
-                 angle=generated.get("angle") or reaction_name)
+                 angle=generated.get("angle") or reaction_name,
+                 mode=mode, visual=visual,
+                 hypothesis=hypothesis,
+                 variable_tested=variable_tested)
 
 
 def finalize_draft(draft):
@@ -421,36 +567,131 @@ def finalize_draft(draft):
     symbol = draft.token.get("symbol", "?")
     image_paths = None
     if fmt == "image":
-        try:
-            image_paths = [render_card(
-                draft.token, snapshot=draft.snapshot,
-                card_type=draft.card_type,
-                question=extract_closing_question(content),
-                reaction=draft.reaction)]
-        except CardRenderError as e:
-            print(f"  ⚠️ Card render failed for ${symbol} ({e}), falling back to short text")
-            audit_logger.info(f"IMAGE_FALLBACK|{symbol}|render_failed")
-            fmt = "short"
-            image_paths = None
+        if (draft.visual or None) == "banner":
+            # Experiment visual switch: the day plan asked for a
+            # banner instead of the card. The banner reuses B's
+            # module with no new render code: headline = the post's
+            # first two lines (space-joined — the banner wraps by
+            # width), deck none, stance from the token's 24h change.
+            # Snapshot is the draft's, or a fresh build; a banner
+            # failure falls back to the card the draft was built
+            # for, and a card failure falls back to short text.
+            # LAST_BANNER_STYLE is cleared first so a card fallback
+            # can never inherit a stale style at schedule time.
+            _banner.LAST_BANNER_STYLE = {}
+            snapshot = draft.snapshot or build_snapshot(draft.token)
+            banner_done = False
+            if snapshot is None:
+                print(f"  ⚠️ No klines for ${symbol}, falling back to card")
+                audit_logger.info(f"IMAGE_FALLBACK|{symbol}|klines_failed")
+            else:
+                try:
+                    lines = [line.strip() for line in
+                             (content or "").split("\n") if line.strip()][:2]
+                    headline = " ".join(lines)
+                    chg = draft.token.get("price_change_percent", 0) or 0
+                    stance = derive_stance(chg, draft.category)
+                    image_paths = [_banner.render_article_banner(
+                        draft.token, snapshot, stance, "", headline,
+                        style=None)]
+                    banner_done = True
+                except _banner.BannerAssertionError as e:
+                    print(f"  ⚠️ Banner assertion failed for ${symbol} ({e}), falling back to card")
+                    audit_logger.info(f"IMAGE_FALLBACK|{symbol}|banner_mismatch")
+                except CardRenderError as e:
+                    print(f"  ⚠️ Banner render failed for ${symbol} ({e}), falling back to card")
+                    audit_logger.info(f"IMAGE_FALLBACK|{symbol}|cover_render_failed")
+            if not banner_done:
+                try:
+                    image_paths = [render_card(
+                        draft.token, snapshot=snapshot,
+                        card_type=draft.card_type,
+                        question=extract_closing_question(content),
+                        reaction=draft.reaction)]
+                except CardRenderError as e:
+                    print(f"  ⚠️ Card render failed for ${symbol} ({e}), falling back to short text")
+                    audit_logger.info(f"IMAGE_FALLBACK|{symbol}|render_failed")
+                    fmt = "short"
+                    image_paths = None
+        else:
+            try:
+                image_paths = [render_card(
+                    draft.token, snapshot=draft.snapshot,
+                    card_type=draft.card_type,
+                    question=extract_closing_question(content),
+                    reaction=draft.reaction)]
+            except CardRenderError as e:
+                print(f"  ⚠️ Card render failed for ${symbol} ({e}), falling back to short text")
+                audit_logger.info(f"IMAGE_FALLBACK|{symbol}|render_failed")
+                fmt = "short"
+                image_paths = None
     elif fmt == "longform":
-        try:
-            # Long-form covers keep the plain style: no snapshot is
-            # built on this path, and the cover contract is unchanged.
-            image_paths = [render_card(draft.token, style="plain")]
-        except CardRenderError as e:
-            print(f"  ⚠️ Cover render failed for ${symbol} ({e}), publishing without cover")
-            audit_logger.info(f"IMAGE_FALLBACK|{symbol}|cover_render_failed")
+        # The article cover is a banner rendered from the research
+        # pack + the validated article JSON — never the old plain
+        # card. A banner problem never drops the article: render or
+        # assertion failure publishes coverless, format kept.
+        # LAST_BANNER_STYLE is cleared first so a coverless article
+        # can never inherit a stale style at schedule time.
+        _banner.LAST_BANNER_STYLE = {}
+        if draft.snapshot is None:
+            # Klines failed: no closes, no banner — the article
+            # still publishes coverless.
+            print(f"  ⚠️ No klines for ${symbol}, publishing article without cover")
+            audit_logger.info(f"IMAGE_FALLBACK|{symbol}|klines_failed")
             image_paths = None
+        else:
+            try:
+                article = draft.article_json or {}
+                headline = (article.get("headline") or "").strip()
+                deck = (article.get("deck") or "").strip()
+                stance = (article.get("stance") or "").strip().upper()
+                chg = draft.token.get("price_change_percent", 0) or 0
+                if not headline:
+                    # Code-built fallback: {SYMBOL} {VERB} {chg}%.
+                    headline = (f"{symbol} {verb_for_change(chg)} "
+                                f"{chg:+.1f}%")
+                if stance not in ("BEARISH", "BULLISH", "NEUTRAL"):
+                    stance = derive_stance(chg, draft.category)
+                # AUTO style from the real research pack; the pack's
+                # facts carry no closes, so hand the selection the
+                # snapshot's closes (copy — the stored pack is not
+                # mutated) or style C could never be picked.
+                style = None
+                pack = draft.research_pack
+                if pack is not None:
+                    sel_pack = pack
+                    closes = draft.snapshot.closes or []
+                    if closes:
+                        sel_pack = dict(pack)
+                        sel_pack["facts"] = {
+                            **(pack.get("facts") or {}),
+                            "closes": list(closes),
+                        }
+                    style = _banner.select_banner_style(sel_pack, article)
+                image_paths = [_banner.render_article_banner(
+                    draft.token, draft.snapshot, stance, deck, headline,
+                    style=style)]
+            except _banner.BannerAssertionError as e:
+                print(f"  ⚠️ Banner assertion failed for ${symbol} ({e}), publishing without cover")
+                audit_logger.info(f"IMAGE_FALLBACK|{symbol}|banner_mismatch")
+                image_paths = None
+            except CardRenderError as e:
+                print(f"  ⚠️ Banner render failed for ${symbol} ({e}), publishing without cover")
+                audit_logger.info(f"IMAGE_FALLBACK|{symbol}|cover_render_failed")
+                image_paths = None
     return content, fmt, title, image_paths
 
 
 def prepare_post(token, category, scores, reaction=None, memory=None,
-                 total_score=0.0):
+                 total_score=0.0, mode=None, day_plan=None):
     """Thin wrapper: draft + finalize. Existing call sites keep
     working unchanged; the pool path calls the two phases
-    separately so only the winner is rendered."""
+    separately so only the winner is rendered. `mode`/`day_plan`
+    thread the experiment plan into prepare_draft (None = inactive,
+    today's behaviour)."""
     draft = prepare_draft(token, category, scores, reaction=reaction,
-                          memory=memory, total_score=total_score)
+                          memory=memory, total_score=total_score,
+                          mode=mode, day_plan=day_plan)
     if draft is None:
         return None
     return finalize_draft(draft)
@@ -559,16 +800,24 @@ def _provider_meta():
     return meta.get("provider") or "unknown", meta.get("model") or ""
 
 
-def _record_scheduled_post(symbol, angle, card_type, content):
+def _record_scheduled_post(symbol, angle, card_type, content,
+                           format=None, prompt_version=None, mode="",
+                           hypothesis="", variable_tested=""):
     """One logs/posts.csv row for a scheduled post. Best-effort:
-    a logging failure must never break scheduling."""
+    a logging failure must never break scheduling. format/mode/
+    hypothesis/variable_tested are the experiment columns (spec §7);
+    mode/hypothesis/variable_tested stay "" until worker C wires the
+    day plan — the CSV columns exist now so rows are joinable."""
     try:
         provider, model = _provider_meta()
         append_post_row(symbol=symbol, angle=angle or "",
                         card_type=card_type or "none",
                         word_count=len((content or "").split()),
                         model=model, provider=provider,
-                        prompt_version=PROMPT_VERSION)
+                        prompt_version=prompt_version or PROMPT_VERSION,
+                        format=format or "short", mode=mode,
+                        hypothesis=hypothesis,
+                        variable_tested=variable_tested)
     except Exception as e:
         logger.warning(f"posts.csv write failed for ${symbol}: {e}")
 
@@ -585,6 +834,10 @@ def _schedule_winner(worker_id, draft, hook, scheduled_queue):
     delay = get_post_delay()
     scheduled_time = _chain_time(scheduled_queue.get_last_post_time(),
                                  current_time, delay)
+    if experiment_window_active():
+        # Experiment window: the post may only go out 07:30-09:30
+        # WIB — clamp the chained time into the window.
+        scheduled_time = clamp_to_experiment_window(scheduled_time)
     session = get_current_session()
     provider, _model = _provider_meta()
     scheduled_queue.add_post(
@@ -599,8 +852,33 @@ def _schedule_winner(worker_id, draft, hook, scheduled_queue):
         title=title,
         image_paths=image_paths,
     )
+    if fmt == "longform":
+        # The banner style rides in card_type so the experiment log
+        # can join style to views; coverless articles record "none".
+        if image_paths:
+            banner_style = (_banner.LAST_BANNER_STYLE or {}).get("style")
+            csv_card_type = (f"banner:{banner_style}"
+                             if banner_style else "none")
+        else:
+            csv_card_type = "none"
+    else:
+        csv_card_type = draft.card_type
+        if (draft.visual or None) == "banner" and image_paths:
+            # The banner rendered instead of the card: record it.
+            # When the banner failed and the card rendered instead,
+            # LAST_BANNER_STYLE is empty (finalize clears it first)
+            # and the draft's card type stands.
+            banner_style = (_banner.LAST_BANNER_STYLE or {}).get("style")
+            if banner_style:
+                csv_card_type = f"banner:{banner_style}"
     _record_scheduled_post(symbol, draft.angle or draft.reaction,
-                           draft.card_type, content)
+                           csv_card_type, content, format=fmt,
+                           prompt_version=(ARTICLE_PROMPT_VERSION
+                                           if fmt == "longform"
+                                           else PROMPT_VERSION),
+                           mode=draft.mode or "",
+                           hypothesis=draft.hypothesis or "",
+                           variable_tested=draft.variable_tested or "")
     # Scheduling is the commitment point for the per-format daily
     # caps, the dedupe record, the post memory, the reaction deck,
     # the variant rotation, and the news catalyst: losers record
@@ -641,6 +919,16 @@ def run_pool_round(worker_id, scheduled_queue=None):
         queue = scheduled_queue or ScheduledPostQueue()
         if not can_post():
             return False
+        if experiment_window_active() and not has_daily_quota(
+                queue.get_post_count()):
+            # JIT quota gate (window only): with DAILY_POST_LIMIT=1
+            # the JIT path must not queue a second post the day
+            # cannot publish. When the window is OFF this gate is
+            # not applied — JIT quota behaviour is unchanged there.
+            audit_logger.info(
+                f"QUOTA_FULL|jit|posted={get_today_posts()}|"
+                f"queued={queue.get_post_count()}")
+            return False
         if queue.get_post_count() >= SCHEDULE_BUFFER_MAX:
             return False
         pool_size = DRAFT_POOL_SIZE
@@ -654,8 +942,17 @@ def run_pool_round(worker_id, scheduled_queue=None):
         # The avoid-list (5 most recent scheduled openers) is fetched
         # once per round and feeds both the prompt (via prepare_draft)
         # and the opener-freshness check below — one snapshot of the
-        # queue for the whole round.
+        # queue for the whole round. The experiment day plan is
+        # computed once per round the same way, and passed into
+        # prepare_draft; when inactive it is None and the draft call
+        # is byte-identical to today (no new kwargs — older stubs
+        # with the pre-experiment signature keep working).
         recent_openers = queue.get_recent_scheduled_posts(5)
+        day_plan = _experiment.current_day_plan()
+        draft_extra = {}
+        if day_plan is not None:
+            draft_extra = {"mode": day_plan.get("mode"),
+                           "day_plan": day_plan}
         for token, cat, scored, hook in candidates:
             memory_rec = get_memory(token["symbol"])
             reaction = draw_reaction(token, memory_rec)
@@ -667,7 +964,8 @@ def run_pool_round(worker_id, scheduled_queue=None):
                                   reaction=reaction,
                                   memory=memory_block or None,
                                   total_score=scored["total"],
-                                  avoid_openers=recent_openers)
+                                  avoid_openers=recent_openers,
+                                  **draft_extra)
             if draft is None:
                 if was_rate_limited_since(t0):
                     rate_limited = True
@@ -810,7 +1108,21 @@ def processor_worker(worker_id: int):
                     if "btc_change_24h" in raw:
                         token["btc_change_24h"] = raw["btc_change_24h"]
 
-                    prepared = prepare_post(token, cat, scored["scores"])
+                    # Experiment day plan, computed per token (the
+                    # pre-JIT path has no pool round to share one).
+                    # Inactive -> None, and prepare_post is called
+                    # exactly as today (no new kwargs).
+                    day_plan = _experiment.current_day_plan()
+                    post_extra = {}
+                    if day_plan is not None:
+                        post_extra = {"mode": day_plan.get("mode"),
+                                      "day_plan": day_plan}
+                    exp_mode = (day_plan or {}).get("mode") or ""
+                    exp_hypothesis = (day_plan or {}).get("hypothesis") or ""
+                    exp_variable = (day_plan or {}).get(
+                        "variable_tested") or ""
+                    prepared = prepare_post(token, cat, scored["scores"],
+                                            **post_extra)
                     if prepared:
                         post, fmt, title, image_paths = prepared
                         current_time = time.time()
@@ -825,6 +1137,10 @@ def processor_worker(worker_id: int):
                         else:
                             scheduled_time = current_time + delay
                             print(f"  📅 Queue empty, scheduling in {delay}s")
+
+                        if experiment_window_active():
+                            scheduled_time = clamp_to_experiment_window(
+                                scheduled_time)
 
                         session = get_current_session()
 
@@ -843,10 +1159,21 @@ def processor_worker(worker_id: int):
                         )
                         # The card type is not returned by prepare_post
                         # on this path; record image-vs-text only.
+                        # The experiment mode/hypothesis/variable ride
+                        # from the day plan computed above (blank when
+                        # inactive); the visual rides via the image
+                        # card_type, as in _schedule_winner.
                         _record_scheduled_post(
                             token["symbol"],
                             _post_gen.LAST_DRAFT_META.get("angle"),
-                            "image" if fmt == "image" else "none", post)
+                            "image" if fmt == "image" else "none", post,
+                            format=fmt,
+                            prompt_version=(ARTICLE_PROMPT_VERSION
+                                            if fmt == "longform"
+                                            else PROMPT_VERSION),
+                            mode=exp_mode,
+                            hypothesis=exp_hypothesis,
+                            variable_tested=exp_variable)
 
                         # Scheduling is the commitment point for the
                         # per-format daily caps (see storage/format_counter).
@@ -917,6 +1244,21 @@ def poster_worker():
             if not can_post():
                 if check_and_sleep():
                     break
+                continue
+
+            # Experiment window: outside 07:30-09:30 WIB, hold WITHOUT
+            # claiming — the row stays queued (the existing stale-drop
+            # removes it if the window is missed by >90 min). The
+            # sleep is bounded (1h slices) and interruptible via
+            # stop_flag. When the window is OFF this branch never runs.
+            if experiment_window_active() and not in_experiment_window():
+                nxt = next_experiment_window_start()
+                wait = (nxt - datetime.now(WIB)).total_seconds()
+                print(f"  ⏸️ Outside experiment window, next window "
+                      f"{nxt.strftime('%H:%M')} WIB")
+                audit_logger.info(
+                    f"WINDOW_HOLD|next={nxt.strftime('%Y-%m-%d %H:%M')}")
+                stop_flag.wait(timeout=max(1.0, min(wait, 3600)))
                 continue
 
             # Atomic cross-process claim: the row is deleted inside

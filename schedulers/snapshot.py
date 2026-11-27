@@ -87,6 +87,31 @@ class CardSnapshot:
     def range_width_pct(self):
         return range_width_pct_of(self.token)
 
+    def path_facts(self) -> dict:
+        """Code-derived price-path facts from the 24 hourly closes
+        (article redesign §4.1): the 24h-ago price plus the session
+        low/high and how many hours ago each occurred. `closes` is
+        oldest-first, so closes[0] is ~24h ago and closes[-1] is the
+        latest hour; hours_ago counts back from the latest close.
+        Empty dict when there are no usable closes. These are NOT in
+        to_dict() — they live here so the short-form snapshot JSON
+        (and its prompt bytes) stay unchanged; build_research_pack
+        merges them into the article pack's facts.
+        """
+        closes = [c for c in (self.closes or []) if c]
+        if not closes:
+            return {}
+        n = len(closes)
+        low_idx = min(range(n), key=lambda i: closes[i])
+        high_idx = max(range(n), key=lambda i: closes[i])
+        return {
+            "price_24h_ago": closes[0],
+            "session_low": closes[low_idx],
+            "session_low_hours_ago": n - 1 - low_idx,
+            "session_high": closes[high_idx],
+            "session_high_hours_ago": n - 1 - high_idx,
+        }
+
     def to_dict(self) -> dict:
         """Plain-dict view of the snapshot: the same numbers feed the
         prompt, the number validator, and the card — no second fetch,

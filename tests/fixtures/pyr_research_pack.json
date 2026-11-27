@@ -1,0 +1,39 @@
+{
+  "facts": {
+    "symbol": "PYR",
+    "price": 0.021,
+    "change_24h": -48.8,
+    "volume_24h": 500000,
+    "high": 0.047,
+    "low": 0.019,
+    "volume_ratio": 0.6,
+    "volume_7d_avg": 833333.33,
+    "range_position": 0.0714,
+    "range_width_pct": 133.333,
+    "btc_change": -1.7,
+    "btc_relative": -47.1,
+    "price_24h_ago": 0.0408,
+    "session_low": 0.019,
+    "session_low_hours_ago": 3,
+    "session_high": 0.047,
+    "session_high_hours_ago": 20
+  },
+  "stance": "BEARISH",
+  "angle": "anomaly",
+  "catalyst": null,
+  "memory": null,
+  "missing": {
+    "fillable": [
+      "news catalyst"
+    ],
+    "unavailable": [
+      ">24h price history",
+      "market cap at move time",
+      "funding rates and open interest",
+      "holder flows",
+      "order-book depth",
+      "sub-hourly timing",
+      "catalyst source beyond RSS text"
+    ]
+  }
+}

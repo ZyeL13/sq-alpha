@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import sys
 import time
 
@@ -28,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import prompts.reactions as reactions  # noqa: E402
 import prompts.styles as styles  # noqa: E402
+import schedulers.banner as banner  # noqa: E402
 import schedulers.card_renderer as card_renderer  # noqa: E402
 import schedulers.orchestrator as orch  # noqa: E402
 import schedulers.sketchnote as sketchnote  # noqa: E402
@@ -35,8 +37,10 @@ import storage.memory_store as memory_store  # noqa: E402
 import storage.posts_csv as posts_csv  # noqa: E402
 from generators.json_validate import validate_draft_json  # noqa: E402
 from processors.draft_scoring import _token_numbers  # noqa: E402
+from processors.score import score_token  # noqa: E402
 from schedulers.snapshot import CardSnapshot  # noqa: E402
 from storage.scheduled_post_queue import ScheduledPostQueue  # noqa: E402
+from tests.test_article_redesign import PYR_CLOSES, PYR_TOKEN  # noqa: E402
 
 # Real illustrations when they exist on this machine (the VM); an
 # empty dir elsewhere renders the card without art, like production
@@ -137,6 +141,90 @@ def _fake_snapshot(token):
         btc_change=token.get("btc_change_24h"))
 
 
+# Article dry-run outputs (the coordinator verifies spec §9 against
+# these): the rendered banner PNG + the validated article JSON.
+ARTICLE_OUT_BANNER = os.path.expanduser(
+    "~/workspace/your_files/sq-alpha-dryrun-banner-pyr.png")
+ARTICLE_OUT_JSON = os.path.expanduser(
+    "~/workspace/your_files/sq-alpha-dryrun-article-pyr.json")
+
+
+def _run_article_dry_run():
+    """Article dry-run (spec §7/§9): a PYR-style fixture token
+    (price 0.0210, chg -48.8, volume 500_000, no news, range near
+    low) + a real CardSnapshot built from PYR_CLOSES + a stubbed LLM
+    returning tests/fixtures/pyr_article_good.json -> the REAL
+    generate_longform (prompt, §6 gates, LAST_DRAFT_META) and the
+    REAL finalize_draft (banner render). The banner PNG + article
+    JSON are copied to ~/workspace/your_files/ for inspection.
+    Returns a report dict (ok=False with a reason on any failure)."""
+    import generators.post_generator as pg
+    import llm as llm_mod
+
+    fixtures = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "tests", "fixtures")
+    with open(os.path.join(fixtures, "pyr_article_good.json")) as f:
+        article = json.load(f)
+
+    pyr_token = dict(PYR_TOKEN)
+    pyr_token["btc_change_24h"] = -1.7
+    pyr_token["market_cap"] = 0
+    pyr_token["volume_rank"] = 999
+    pyr_token["timestamp"] = 1794634800
+    snapshot = CardSnapshot(token=dict(pyr_token), closes=list(PYR_CLOSES),
+                            volume_7d_avg=833333.33, btc_change=-1.7)
+
+    real_generate = pg.generate
+    real_build_snapshot = orch.build_snapshot
+    real_format_counts = orch.get_format_counts
+    real_meta = dict(llm_mod.last_call_meta or {})
+
+    def _fake_llm(prompt, system_prompt=None, category=None, **kwargs):
+        return json.dumps(article)
+
+    pg.generate = _fake_llm
+    orch.build_snapshot = lambda t: snapshot
+    orch.get_format_counts = lambda: {"image": 0, "longform": 0}
+    llm_mod.last_call_meta = {"provider": "dry-run", "model": "fixture"}
+    try:
+        draft = orch.prepare_draft(pyr_token, "LOSERS", {})
+        if draft is None:
+            return {"ok": False, "reason": "prepare_draft returned None"}
+        content, fmt, title, image_paths = orch.finalize_draft(draft)
+    finally:
+        pg.generate = real_generate
+        orch.build_snapshot = real_build_snapshot
+        orch.get_format_counts = real_format_counts
+        llm_mod.last_call_meta = real_meta
+    if fmt != "longform":
+        return {"ok": False,
+                "reason": f"expected longform, got {fmt}"}
+    if not image_paths:
+        return {"ok": False, "reason": "banner did not render"}
+    banner_path = image_paths[0]
+    os.makedirs(os.path.dirname(ARTICLE_OUT_BANNER), exist_ok=True)
+    shutil.copy(banner_path, ARTICLE_OUT_BANNER)
+    with open(ARTICLE_OUT_JSON, "w") as f:
+        json.dump(draft.article_json, f, indent=2)
+    # §11 pool-scoring-bias check: score the article with the real
+    # mechanical scorer (same function the pool uses) so the report
+    # can compare it with the pool winner's total below.
+    scored = score_token(pyr_token, "LOSERS")
+    article_score = orch.score_draft(content, pyr_token,
+                                     scored["total"], [], snapshot)
+    return {
+        "ok": True,
+        "fmt": fmt,
+        "title": title,
+        "words": len(content.split()),
+        "chars": len(content),
+        "banner_path": ARTICLE_OUT_BANNER,
+        "banner_style": (banner.LAST_BANNER_STYLE or {}).get("style"),
+        "article_score": article_score,
+        "signal_total": scored["total"],
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="dry-run-pool")
@@ -169,6 +257,9 @@ def main():
     sketchnote._ILLUSTRATIONS_DIR = (REAL_ART if os.path.isdir(REAL_ART)
                                      else art_dir)
     card_renderer.CARDS_DIR = cards_dir
+    banner.CARDS_DIR = cards_dir
+    banner.BANNER_STYLES_FILE = os.path.join(state_dir,
+                                             "banner_styles.json")
     queue = ScheduledPostQueue(db_path=os.path.join(state_dir,
                                                     "scheduled.db"))
     queue.add_post(post=SEED_POST, category="GAINERS", symbol="MORPHO",
@@ -176,6 +267,9 @@ def main():
     memory_store.record_memory(
         "NOVA", -2.1,
         "$NOVA slipped -2.1% on thin volume, nothing to chase.")
+
+    # ---- article dry-run: real generate_longform + real banner ----
+    article_run = _run_article_dry_run()
 
     # ---- recorders for the winner-only side effects ----
     scored = []       # (symbol, DraftScore)
@@ -220,7 +314,14 @@ def main():
     orch.data_queue = _FakeQueue(TOKENS)
     orch.normalize_token = lambda raw, source=None: dict(raw)
     orch.generate_post = _fake_generate
-    orch.generate_longform = lambda *a, **k: None
+
+    def _pool_longform_stub(*a, **k):
+        # The pool round never selects longform for its tokens; the
+        # article path is exercised for real in _run_article_dry_run
+        # above (real generate_longform + stubbed LLM + real banner).
+        return None
+
+    orch.generate_longform = _pool_longform_stub
     orch.build_snapshot = _fake_snapshot
     orch.score_draft = _recording_score
     orch.can_post = lambda: True
@@ -269,6 +370,32 @@ def main():
                      f"(best={best:.1f}, threshold={orch.ABSTAIN_THRESHOLD})")
     else:
         lines.append("ABSTAIN: n/a (no scored drafts)")
+    lines.append("")
+    lines.append("ARTICLE DRY-RUN (PYR, real generate_longform + stubbed LLM):")
+    if article_run.get("ok"):
+        lines.append(f"  fmt={article_run['fmt']} title={article_run['title']!r}")
+        lines.append(f"  words={article_run['words']} chars={article_run['chars']} "
+                     "(target 550-750 words)")
+        lines.append(f"  banner={article_run['banner_path']} "
+                     f"style={article_run['banner_style']}")
+        lines.append(f"  article json: {ARTICLE_OUT_JSON}")
+        score = article_run["article_score"]
+        if score is not None:
+            lines.append(f"  mechanical score: total={score.total:.1f} "
+                         f"[{score.components_str()}] "
+                         f"(signal total={article_run['signal_total']:.2f})")
+            pool_best = max(scored_totals) if scored_totals else None
+            if pool_best is not None:
+                verdict = ("WOULD HAVE WON the pool"
+                           if score.total > pool_best
+                           else "would NOT have won the pool")
+                lines.append(f"  POOL-SCORING BIAS (§11): article "
+                             f"{score.total:.1f} vs pool best "
+                             f"{pool_best:.1f} -> {verdict}")
+        else:
+            lines.append("  mechanical score: REJECTED by validate_post")
+    else:
+        lines.append(f"  FAILED: {article_run.get('reason')}")
     lines.append("")
     rows = queue.get_recent_scheduled_posts(5)
     winner_text = rows[0] if rows else None

@@ -4,19 +4,22 @@ from typing import Dict, Any, Optional
 import llm
 from llm import generate
 from prompts.fewshot import load_fewshot_examples
-from prompts.rebate import REBATE_SYSTEM, REBATE_SYSTEM_CORE
+from prompts.rebate import REBATE_SYSTEM_CORE
 from prompts.styles import (
     STYLE_GUIDANCE,
     VOICE_CALIBRATION,
+    derive_stance,
     generate_data_anchor,
     insufficient_insight,
     next_opening_angle,
     record_angle_used,
     select_editorial_style,
+    select_post_format_with_reason,
+    verb_for_change,
 )
-from config import LONGFORM_MAX_TOKENS, PROMPT_VERSION
-from generators.json_validate import parse_json_reply, validate_draft_json
-from generators.quality_gate import validate_post, validate_longform, is_similar_to_recent, clean_redundant_symbol_references, proofread_post
+from config import LONGFORM_MAX_TOKENS, LONGFORM_TARGET_WORDS, PROMPT_VERSION
+from generators.json_validate import parse_json_reply, validate_article_json, validate_draft_json
+from generators.quality_gate import validate_post, validate_longform, is_similar_to_recent, clean_redundant_symbol_references, proofread_post, validate_mode_post
 from processors.draft_scoring import _token_numbers
 from storage.post_history import record_post as add_to_recent
 import logging_config
@@ -131,13 +134,44 @@ def _data_section(token: Dict[str, Any]) -> str:
     return data_section
 
 
+# ------------------------------------------------------------------
+# Experiment modes (worker C, audit §G): one instruction block per
+# short-form mode, in exactly one place. `mode` is one of pulse /
+# contrarian / onchain (deep-signal goes through generate_longform,
+# not here). A mode post always ends with one SPECIFIC discussion
+# question (audit §G.5: a number, a choice, or a falsifiable claim
+# in it) — the gate enforces presence only; the prompt teaches the
+# specificity.
+# ------------------------------------------------------------------
+MODE_INSTRUCTIONS = {
+    "pulse": (
+        "MODE: Market Pulse — one move, one reason it matters, one question.\n"
+        "Headline: line 1 is {symbol} + the fact (price + change + volume, exact); "
+        "line 2 is the hook. The headline block is at most 2 lines, "
+        "each line at most 90 characters. Then the one-sentence read, "
+        "then the question. No background paragraph, no disclaimer paragraph."),
+    "contrarian": (
+        "MODE: Contrarian View — take a position the consensus would argue with, and show the evidence.\n"
+        "State what everyone believes in one sentence, fairly stated; give 2-3 checkable facts "
+        "from the SNAPSHOT; state the author's stance; and state what would prove the author wrong."),
+    "onchain": (
+        "MODE: On-chain Watch — numbers first, narrative second.\n"
+        "Lead with one metric + its source + timeframe, say what changed vs the previous reading, "
+        "what it means in one paragraph, and what to watch next (one specific level or event)."),
+}
+MODE_QUESTION_LINE = (
+    "End the post with ONE specific discussion question — a question with a number, a choice, "
+    "or a falsifiable claim in it (audit §G.5). The question must be the last sentence of the post.")
+
+
 def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] | None = None,
                  opening_angle: "tuple[str, str] | None" = None,
                  closing_question: bool = False,
                  reaction: "tuple[str, str] | None" = None,
                  memory: "str | None" = None,
                  snapshot_dict: "dict | None" = None,
-                 avoid_openers: "list[str] | None" = None) -> str:
+                 avoid_openers: "list[str] | None" = None,
+                 mode: "str | None" = None) -> str:
     """Build the user prompt for one post.
 
     Editorial v2: the style is selected from the token's own data
@@ -179,6 +213,13 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
     prompt, so Luna never sees conflicting format demands.
     """
     symbol = token["symbol"]
+    if mode is not None and mode not in MODE_INSTRUCTIONS:
+        raise ValueError(f"unknown mode: {mode!r}")
+    mode_block = ""
+    if mode is not None:
+        mode_block = (
+            "\n" + MODE_INSTRUCTIONS[mode].format(symbol=f"${symbol}")
+            + "\n" + MODE_QUESTION_LINE)
     data_section = _data_section(token)
     if memory:
         data_section += f"\nMEMORY: {memory}"
@@ -215,7 +256,9 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
         )
         person_rule = "- No first or second person: no \"i\", \"we\", \"you\"."
         drawn_angle = angle_name
-    if closing_question:
+    if closing_question or mode is not None:
+        # Mode posts always end with the specific closing question
+        # (MODE_QUESTION_LINE above); image posts keep the old rule.
         ending_rule = ("- End the post with a closing question: the question "
                        "the observation raises. It must be the last sentence "
                        "of the post.")
@@ -293,7 +336,7 @@ def build_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] 
 
 GOAL: Make the reader curious enough to check ${symbol}'s chart.
 
-{opening_block}
+{opening_block}{mode_block}
 
 DATA:
 {data_section}{snapshot_block}{avoid_block}{fewshot_block}
@@ -328,56 +371,175 @@ RULES:
     return prompt
 
 
-def build_longform_prompt(token: Dict[str, Any], category: str, scores: Dict[str, float] | None = None) -> str:
-    """Build the user prompt for one long-form article (V3 Phase 1).
+# ------------------------------------------------------------------
+# Article redesign (spec §4.1): the research pack is the single
+# source of truth for a long-form article — code-built, no LLM.
+# ------------------------------------------------------------------
 
-    Same data section, system prompt, style selection and voice
-    calibration as the short form — only the shape changes: a title
-    line, then a structured article (thesis, what happened, why it
-    matters, bull case, bear case, limitations/invalidation,
-    conclusion). Section labels are plain uppercase lines, never
-    markdown '#' headings (Square parses '#' as a hashtag and
-    clean_for_square strips it).
+# Gaps that are NEVER collected by any existing collector, so LIMITS
+# must name them specifically instead of papering them over (§4.1).
+_MISSING_UNAVAILABLE = (
+    ">24h price history",
+    "market cap at move time",
+    "funding rates and open interest",
+    "holder flows",
+    "order-book depth",
+    "sub-hourly timing",
+    "catalyst source beyond RSS text",
+)
+
+
+def build_research_pack(token: Dict[str, Any], snapshot, category: str,
+                        justification, memory: "str | None" = None) -> dict:
+    """Build the research pack for one long-form article (spec §4.1).
+
+    `snapshot` is a CardSnapshot or None (klines failed — the article
+    still generates from the token dict, and the pack marks the
+    snapshot fields missing). Keys: facts / stance / angle /
+    catalyst / memory / missing. `facts` is the snapshot dict (or
+    the token dict when snapshot is None) PLUS code-derived path
+    facts from the closes; `stance` is the code-derived stance;
+    `angle` is the select_post_format justification that triggered
+    long-form; `missing` is the two-group split (fillable-but-absent
+    vs genuinely-unavailable).
     """
+    # Local import: schedulers/ must never be imported at module
+    # load by generators/ (orchestrator imports both ways round).
+    from schedulers.snapshot import snapshot_dict_for_prompt
+
+    facts = snapshot_dict_for_prompt(token, snapshot)
+    if snapshot is not None:
+        try:
+            facts.update(snapshot.path_facts())
+        except Exception:
+            pass
+
+    chg = token.get("price_change_percent", 0) or 0
+    stance = derive_stance(chg, category)
+    if justification is None:
+        _, justification = select_post_format_with_reason(token, category)
+
+    catalyst = None
+    news = token.get("news_catalyst")
+    if news:
+        catalyst = {"text": news}
+        if token.get("price_at_news"):
+            catalyst["price_at_news"] = token.get("price_at_news")
+        if token.get("volume_at_news"):
+            catalyst["volume_at_news"] = token.get("volume_at_news")
+
+    fillable = []
+    if "volume_ratio" not in facts:
+        fillable.append("volume vs 7-day average")
+    if "btc_change" not in facts:
+        fillable.append("BTC 24h change")
+    if "range_position" not in facts:
+        fillable.append("position in the 24h range")
+    if catalyst is None:
+        fillable.append("news catalyst")
+
+    return {
+        "facts": facts,
+        "stance": stance,
+        "angle": justification,
+        "catalyst": catalyst,
+        "memory": memory,
+        "missing": {
+            "fillable": fillable,
+            "unavailable": list(_MISSING_UNAVAILABLE),
+        },
+    }
+
+
+def _assemble_article_body(article: dict) -> str:
+    """The publishable body text of a validated article JSON: the 7
+    sections with their uppercase labels, in order."""
+    labels = (
+        ("THESIS", "thesis"),
+        ("WHAT HAPPENED", "what_happened"),
+        ("WHY IT MATTERS", "why_it_matters"),
+        ("BULL CASE", "bull_case"),
+        ("BEAR CASE", "bear_case"),
+        ("LIMITS AND INVALIDATION", "limits"),
+        ("CONCLUSION", "conclusion"),
+    )
+    parts = []
+    for label, key in labels:
+        parts.append(f"{label}\n\n{article[key].strip()}")
+    return "\n\n".join(parts)
+
+
+def build_longform_prompt(token: Dict[str, Any], category: str,
+                          scores: Dict[str, float] | None = None,
+                          research_pack: "dict | None" = None,
+                          require_question: bool = False) -> str:
+    """Build the user prompt for one long-form article (redesign,
+    spec §3.2/§4.2).
+
+    Research pack as JSON + the section contracts (each section's job
+    stated once) + the §3.1 principles stated once. The old prompt's
+    ~7x repeated caution is deleted, not reworded: the prompt says
+    "never invent" exactly once, and the system prompt is the trimmed
+    REBATE_SYSTEM_CORE. Output is JSON (same contract as step 1).
+    Callers that already built a pack pass it; otherwise one is
+    built here from the token (no snapshot, no memory).
+
+    require_question (experiment): add ONE line instructing that
+    CONCLUSION must end with one specific discussion question. The
+    line repeats no section job and no §3.1 principle, so the
+    prompt-contract tests still count each exactly once.
+    """
+    import json as _json
+
     symbol = token["symbol"]
-    data_section = _data_section(token)
-    style = select_editorial_style(token, scores)
+    if research_pack is None:
+        _, justification = select_post_format_with_reason(
+            token, category, scores)
+        research_pack = build_research_pack(token, None, category,
+                                            justification)
+    pack = research_pack
+    stance = pack["stance"]
+    chg = token.get("price_change_percent", 0) or 0
+    verb = verb_for_change(chg)
+    lo, hi = LONGFORM_TARGET_WORDS
+    memory_block = f"\nMEMORY: {pack['memory']}" if pack.get("memory") else ""
+    question_line = ""
+    if require_question:
+        question_line = ("\nCONCLUSION must end with one specific discussion "
+                         "question (a number, a choice, or a falsifiable "
+                         "claim) — it is the post's discussion prompt.")
 
     prompt = f"""You are writing a long-form market analysis article for Binance Square.
 
 GOAL: Explain what is happening with ${symbol} and what would prove the read wrong.
 
-DATA:
-{data_section}
+STANCE (code-derived — argue this stance, do not choose another): {stance}
+ANGLE (why this is an article): {pack.get("angle")}
+HEADLINE VERB for a {chg:+.1f}% move: {verb}
 
-EDITORIAL STYLE: {style}
-{STYLE_GUIDANCE[style]}
+RESEARCH PACK (JSON — cite ONLY numbers from here):
+{_json.dumps(pack, sort_keys=True, default=str)}{memory_block}
 
-{VOICE_CALIBRATION}
+PRINCIPLES (each applies once):
+- Every section must add information no earlier section stated.
+- A limitation is stated once, in LIMITS AND INVALIDATION only.
+- Separate fact, interpretation, speculation: a fact is a RESEARCH PACK number; an interpretation is a read labeled by its reasons; speculation names the unknown and the specific datum that would resolve it, and belongs only in LIMITS AND INVALIDATION and CONCLUSION.
+- State a conclusion when the data supports it: the article argues the stance above.
+- Missing data is named specifically, from the MISSING list in the research pack — never "limited data" in the abstract.
 
-STRUCTURE — write the article inside <post> tags, exactly like this:
-- Line 1: the article title, in Title Case, on its own line. No cashtag in the title.
-- Then ONE blank line.
-- Then the body, 600-900 words, in sections. Each section starts with
-  its label on its own line in UPPERCASE, then a blank line, then the
-  prose. Use these sections, in this order:
-  THESIS, WHAT HAPPENED, WHY IT MATTERS, BULL CASE, BEAR CASE,
-  LIMITS AND INVALIDATION, CONCLUSION.
-  A section may use a short list when the data genuinely calls for
-  one; prose is the default.
+SECTIONS — {lo}-{hi} words total. Each section has one job; do that job and nothing else:
+- THESIS (60-90 words, one paragraph): the stance, the single strongest reason, and the one number that matters most. No caveats, no meta-commentary.
+- WHAT HAPPENED (80-120 words): the tape as a path — where price sits in its 24h range, volume vs its 7-day average, BTC-relative performance. Numbers stated here are not repeated in later sections, except the headline number in THESIS.
+- WHY IT MATTERS (80-120 words): market context — what this move means vs normal behavior for this token, and who it matters to. The comparison is the new information, not the move.
+- BULL CASE (60-100 words): the strongest bull argument from the data, with its number. Or the single sentence "No bullish case in these data." and stop.
+- BEAR CASE (60-100 words): the mirror of BULL CASE, analysis first, at most one closing sentence of scope.
+- LIMITS AND INVALIDATION (60-90 words): the only section that states limitations. Each limitation once, named from the MISSING list. Plus one specific invalidation condition: a price level or a data point that would prove the read wrong.
+- CONCLUSION (40-70 words): restate the stance and the single condition to watch, in one line. No new claims, no new numbers, no fresh hedging. Must end with terminal punctuation.{question_line}
 
 RULES:
 - Lowercase everything except ${symbol} and other $TOKENS
-- Use only the DATA above. Never invent numbers, technical levels,
-  catalysts, or market sentiment.
-- An interpretation is a view with reasons, not a trade instruction:
-  never tell readers to buy, sell, hold, enter, or exit, and never
-  present the article as financial advice.
-- Bull case and bear case must both be argued from the DATA, not
-  from vibes. If one side has no support in the data, say so plainly
-  instead of inventing it.
-- State the limits of the read and the condition that would
-  invalidate it. No fabricated certainty.
+- Use only the RESEARCH PACK above. Never invent numbers, technical levels, catalysts, or market sentiment.
+- An interpretation is a view with reasons, not a trade instruction: never tell readers to buy, sell, hold, enter, or exit, and never present the article as financial advice.
 - Refer to the token as ${symbol} (with $ prefix, uppercase) exactly ONCE, in the first line of the body. In every later sentence use "the token" — never repeat the cashtag.
 - Do not mention related tokens unless directly relevant to the data.
 - $SYMBOL and all token tickers MUST be uppercase: $XRP not $xrp, $BTC not $btc
@@ -385,62 +547,142 @@ RULES:
 - No first or second person: no "i", "we", "you".
 - Separate paragraphs with ONE blank line. Never write large text blocks.
 
-Write the article inside <post> tags. Nothing outside the tags."""
+Reply with a single JSON object and nothing else:
+{{"title": "<article title, Title Case, no cashtag, <= 200 chars>", "stance": "{stance}", "thesis": "<THESIS>", "what_happened": "<WHAT HAPPENED>", "why_it_matters": "<WHY IT MATTERS>", "bull_case": "<BULL CASE>", "bear_case": "<BEAR CASE>", "limits": "<LIMITS AND INVALIDATION>", "conclusion": "<CONCLUSION>", "headline": "<short punchy headline, <= 90 chars>", "deck": "<one supporting sentence, <= 140 chars>"}}
+Rules for the JSON: "stance" MUST be exactly "{stance}". "headline" uses the headline verb above when it carries a verb. "deck" names a catalyst only when the research pack names one, and then verbatim. No markdown fences, no prose outside the JSON object."""
     return prompt
 
 
-def generate_longform(token: Dict[str, Any], category: str, scores: Dict[str, float]) -> Optional[tuple[str, str]]:
-    """Generate one long-form article. Returns (title, body) or None.
+def generate_longform(token: Dict[str, Any], category: str, scores: Dict[str, float],
+                      snapshot=None, justification=None,
+                      memory: "str | None" = None,
+                      require_question: bool = False) -> Optional[tuple[str, str]]:
+    """Generate one long-form article as JSON. Returns (title, body)
+    or None.
 
-    Mirrors generate_post: skip check first, ONE LLM call (with the
-    long-form-only max_tokens bump), format-aware validation, exactly-1
-    cashtag cleaning. proofread_post is NOT applied — its paragraph
-    reshaping would mangle article sections.
+    One LLM call via output_format="json" (the step-1 bypass), parsed
+    with parse_json_reply, then the §6 gates: validate_longform first,
+    then validate_article_json. Max 1 retry carrying the failure
+    reason (a finish_reason=length reply retries with a shorter
+    "500 words max" target); after the retry fails the article is
+    skipped and prepare_draft falls back to a short post
+    (LONGFORM_FALLBACK). System prompt is REBATE_SYSTEM_CORE.
+    On success the validated article JSON is stashed under
+    LAST_DRAFT_META["article"] and the research pack under
+    LAST_DRAFT_META["research_pack"] (finalize_draft reads these for
+    the banner; when absent it falls back to the code-built headline).
+
+    require_question (experiment, default False = today's behavior):
+    the prompt instructs CONCLUSION to end with one specific
+    discussion question, and after validate_article_json passes the
+    CONCLUSION must end with "?" — otherwise the article is
+    rejected with 1 retry carrying the failure reason, then None.
     """
+    import re
+
     skip_reason = insufficient_insight(token, scores)
     if skip_reason:
         print(f"  ⏭️ Skipping long-form ${token['symbol']}: {skip_reason}")
         audit_logger.info(f"SKIPPED_LONGFORM|{token['symbol']}|{category}|{skip_reason}")
         return None
 
-    prompt = build_longform_prompt(token, category, scores)
-    content = generate(prompt, system_prompt=REBATE_SYSTEM, category=category,
-                       max_tokens=LONGFORM_MAX_TOKENS)
-
-    if not content or not isinstance(content, str):
-        audit_logger.warning(f"GENERATE_LONGFORM_FAILED|{token['symbol']}|{category}|no_content")
-        return None
-
-    # Line 1 is the title, then a blank line, then the body.
-    lines = [ln for ln in content.split("\n")]
-    title = ""
-    body_lines = []
-    for i, line in enumerate(lines):
-        if line.strip():
-            title = line.strip().lstrip("#").strip()
-            body_lines = lines[i + 1:]
-            break
-    body = "\n".join(body_lines).strip()
-    if not title or not body:
-        audit_logger.info(f"REJECTED_LONGFORM|{token['symbol']}|{category}|no_title_or_body")
-        return None
-
-    # A cashtag in the title would break the exactly-once count for
-    # the article as published — strip the $ and keep the ticker name.
-    import re
-    title = re.sub(r"\$([A-Z]+)", r"\1", title)
-
-    valid, result = validate_longform(title, body, symbol=token["symbol"])
-    if not valid:
-        logger.warning(f"Quality gate REJECTED long-form for ${token['symbol']}: {result}")
-        audit_logger.info(f"REJECTED_LONGFORM|{token['symbol']}|{category}|{result}")
-        return None
-    body = result.strip()
-
     symbol = token["symbol"]
-    if f"${symbol}" not in body.upper():
-        body = f"${symbol} " + body
+    if justification is None:
+        _, justification = select_post_format_with_reason(token, category, scores)
+    pack = build_research_pack(token, snapshot, category, justification,
+                               memory=memory)
+    prompt = build_longform_prompt(token, category, scores, research_pack=pack,
+                                   require_question=require_question)
 
+    article = None
+    body = None
+    title = None
+    last_reason = None
+    last_gate = None
+    current_prompt = prompt
+    for attempt in (1, 2):
+        content = generate(current_prompt, system_prompt=REBATE_SYSTEM_CORE,
+                           category=category, output_format="json",
+                           max_tokens=LONGFORM_MAX_TOKENS)
+        if not content or not isinstance(content, str):
+            audit_logger.warning(f"GENERATE_LONGFORM_FAILED|{symbol}|{category}|no_content")
+            return None
+
+        # §6.6a: a non-empty reply cut by finish_reason=length is a
+        # truncation, not a success — reject and retry shorter.
+        finish = (llm.last_call_meta or {}).get("finish_reason")
+        if finish == "length":
+            last_reason = "truncated_length"
+            last_gate = "6a"
+            audit_logger.info(
+                f"VALIDATION_FAILED_LONGFORM|{symbol}|{category}|reason={last_reason}|attempt={attempt}")
+            if attempt == 1:
+                current_prompt = (
+                    prompt + "\n\nYour previous reply was cut off before "
+                    "finishing (finish_reason=length). Rewrite the article "
+                    "at 500 words max, keeping all 11 JSON keys.")
+                continue
+            break
+
+        parsed = parse_json_reply(content)
+        if parsed is None:
+            last_reason = "json_invalid"
+            last_gate = "6b"
+            detail = "json_invalid"
+        else:
+            title_candidate = re.sub(r"\$([A-Z]+)", r"\1",
+                                     str(parsed.get("title") or "")).strip()
+            body_candidate = ""
+            if isinstance(parsed, dict) and all(
+                    k in parsed and isinstance(parsed[k], str)
+                    for k in ("thesis", "what_happened", "why_it_matters",
+                              "bull_case", "bear_case", "limits", "conclusion")):
+                body_candidate = _assemble_article_body(parsed)
+            valid, result = validate_longform(
+                title_candidate, body_candidate, symbol=symbol)
+            if not valid:
+                last_reason = result
+                last_gate = "6b"
+                detail = result
+            else:
+                ok, reason, gate = validate_article_json(
+                    parsed, pack["facts"], pack)
+                if not ok:
+                    last_reason = reason
+                    last_gate = gate
+                    detail = f"gate {gate}: {reason}"
+                elif (require_question
+                        and not str(parsed.get("conclusion") or "")
+                        .strip().endswith("?")):
+                    # Question gate (experiment): CONCLUSION must end
+                    # with one specific discussion question. Same
+                    # 1-retry mechanism as every other failure.
+                    last_reason = "conclusion_missing_question"
+                    last_gate = "question"
+                    detail = ("CONCLUSION must end with one specific "
+                              "discussion question")
+                else:
+                    article = parsed
+                    title = title_candidate
+                    body = result.strip()
+                    break
+        audit_logger.info(
+            f"VALIDATION_FAILED_LONGFORM|{symbol}|{category}|reason={last_reason}|attempt={attempt}")
+        if attempt == 1:
+            current_prompt = (
+                prompt + "\n\nYour previous reply failed validation: "
+                f"{detail}. Fix ONLY that and reply with the JSON object again.")
+    if article is None or body is None:
+        audit_logger.info(
+            f"REJECTED_LONGFORM|{symbol}|{category}|{last_reason}|gate={last_gate}")
+        return None
+
+    # Exactly-1 cashtag: the model may cite $SYMBOL in several
+    # sections; keep the first, rewrite the rest as "the token". If
+    # it cited none, open THESIS with it (the old flow prepended it
+    # to the body the same way).
+    if f"${symbol}" not in body.upper():
+        body = body.replace("THESIS\n\n", f"THESIS\n\n${symbol} ", 1)
     body = clean_redundant_symbol_references(body, symbol)
 
     if is_similar_to_recent(title + "\n\n" + body):
@@ -457,6 +699,8 @@ def generate_longform(token: Dict[str, Any], category: str, scores: Dict[str, fl
         "angle": None,
         "provider": meta.get("provider") or "",
         "model": meta.get("model") or "",
+        "article": article,
+        "research_pack": pack,
     })
 
     audit_logger.info(f"GENERATED_LONGFORM|{symbol}|{category}|{len(body)}_chars")
@@ -489,7 +733,8 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
                   memory: "str | None" = None,
                   snapshot=None, snapshot_dict: "dict | None" = None,
                   avoid_openers: "list[str] | None" = None,
-                  card_type: "str | None" = None) -> Optional[dict]:
+                  card_type: "str | None" = None,
+                  mode: "str | None" = None) -> Optional[dict]:
     """Generate one short-form post as a JSON dict.
 
     Returns {"event", "fact", "interpretation", "angle", "post"} or
@@ -500,6 +745,12 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
     validation failure, then the draft is skipped. Long-form keeps
     the old <post>-tag flow (generate_longform) — this function is
     short-form only.
+
+    `mode` (experiment): pulse / contrarian / onchain. When set, the
+    prompt carries the mode instruction block + the closing-question
+    ending rule, and the validation loop adds the mode checks +
+    the question gate (validate_mode_post) before accepting the
+    post — same 1-retry mechanism as every other failure.
     """
     # Quality over quota: skip before any LLM call when there is
     # genuinely nothing to observe. The reason is audit-logged so the
@@ -534,7 +785,8 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
                           closing_question=closing_question,
                           reaction=reaction, memory=memory,
                           snapshot_dict=snapshot_dict,
-                          avoid_openers=avoid_openers)
+                          avoid_openers=avoid_openers,
+                          mode=mode)
     numbers = _token_numbers(token, snapshot)
     symbol = token["symbol"]
 
@@ -569,6 +821,20 @@ def generate_post(token: Dict[str, Any], category: str, scores: Dict[str, float]
                 if not valid:
                     last_reason = "quality_gate"
                     detail = result
+                elif mode is not None:
+                    # Mode checks + question gate, before accepting.
+                    # Same 1-retry mechanism as every other failure.
+                    # (post is assigned ONLY on success: a failed
+                    # attempt must never leak past the loop.)
+                    candidate_post = result.strip()
+                    ok_m, reason_m = validate_mode_post(
+                        candidate_post, symbol, mode)
+                    if not ok_m:
+                        last_reason = reason_m
+                        detail = reason_m
+                    else:
+                        post = candidate_post
+                        break
                 else:
                     post = result.strip()
                     break

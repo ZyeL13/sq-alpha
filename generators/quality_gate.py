@@ -64,6 +64,51 @@ LONGFORM_REJECT_PATTERNS = [
 # an article below this is a truncated generation, not an article.
 LONGFORM_MIN_BODY_CHARS = 600
 LONGFORM_MAX_TITLE_CHARS = 200
+# Article redesign §6.4/§6.5: per-section word minimums for the
+# section-completeness check, and the headline cap (also enforced by
+# the JSON validator, gate 5).
+LONGFORM_MIN_SECTION_WORDS = 30
+LONGFORM_MIN_CONCLUSION_WORDS = 25
+LONGFORM_MAX_HEADLINE_CHARS = 90
+# The 7 article section labels, in order (spec §3.2). Shared by the
+# text-path completeness check here and the JSON validator.
+LONGFORM_SECTIONS = (
+    "THESIS",
+    "WHAT HAPPENED",
+    "WHY IT MATTERS",
+    "BULL CASE",
+    "BEAR CASE",
+    "LIMITS AND INVALIDATION",
+    "CONCLUSION",
+)
+# One-sentence absence allowed for BULL/BEAR (spec §3.2): the case
+# may be absent, but only as a single short sentence, never a
+# three-paragraph apology.
+LONGFORM_ABSENCE_SENTENCES = (
+    "no bullish case in these data.",
+    "no bearish case in these data.",
+)
+
+
+def split_longform_sections(content: str) -> dict:
+    """Split a text article body into {LABEL: prose} by its
+    uppercase section-label lines. Text before the first label
+    (e.g. the prepended $SYMBOL first line) is ignored. Labels not
+    present are absent from the dict."""
+    sections = {}
+    current = None
+    for line in (content or "").split("\n"):
+        stripped = line.strip()
+        if stripped in LONGFORM_SECTIONS:
+            current = stripped
+            sections[current] = []
+        elif current is not None:
+            sections[current].append(line)
+    return {k: "\n".join(v).strip() for k, v in sections.items()}
+
+
+def _section_word_count(text: str) -> int:
+    return len((text or "").split())
 
 
 def _has_leak_patterns(content: str, patterns) -> bool:
@@ -319,6 +364,32 @@ def validate_longform(title: str, content: str, symbol: str = None) -> tuple[boo
     if symbol and has_double_symbol(content, symbol):
         return False, "Double symbol detected"
 
+    # Section completeness (article redesign §6.4/§6.6b, text path):
+    # all 7 labels present, each section meets its word minimum
+    # (CONCLUSION >= 25, BULL/BEAR may be the 1-sentence absence),
+    # and CONCLUSION ends with terminal punctuation — a cut article
+    # must never pass this gate.
+    sections = split_longform_sections(content)
+    for label in LONGFORM_SECTIONS:
+        text = sections.get(label, "")
+        words = _section_word_count(text)
+        if not text:
+            return False, f"Missing section: {label}"
+        if label == "CONCLUSION":
+            if words < LONGFORM_MIN_CONCLUSION_WORDS:
+                return False, "CONCLUSION too short"
+            if not text.rstrip().endswith((".", "!", "?")):
+                return False, "CONCLUSION incomplete"
+        elif label in ("BULL CASE", "BEAR CASE"):
+            lowered = text.strip().lower()
+            if any(lowered.startswith(s) for s in LONGFORM_ABSENCE_SENTENCES):
+                if words < 8:
+                    return False, f"{label} too short"
+            elif words < LONGFORM_MIN_SECTION_WORDS:
+                return False, f"{label} too short"
+        elif words < LONGFORM_MIN_SECTION_WORDS:
+            return False, f"{label} too short"
+
     # Pattern-only leak scan (filtered list); no first-word heuristic:
     # a section heading is legitimate in an article.
     if _has_leak_patterns(content, LONGFORM_REJECT_PATTERNS):
@@ -364,6 +435,122 @@ def is_similar_to_recent(content: str, threshold: float = 0.85) -> bool:
         if similarity > threshold:
             return True
     return False
+
+
+# ------------------------------------------------------- experiment modes
+# Mode-validation helpers (worker C, audit §G). ADDITIVE ONLY: these
+# are called by generate_post when a mode is set; validate_post /
+# validate_longform behaviour is unchanged. Every helper returns a
+# plain predicate; validate_mode_post combines them per mode and
+# reports the first failure as (False, reason).
+
+MODE_NAMES = ("pulse", "contrarian", "onchain")
+
+# Contrarian falsifiability phrases (audit §G.3: "what would prove
+# the author wrong"). Case-insensitive substring match.
+FALSIFIABILITY_PHRASES = (
+    "wrong if",
+    "would prove",
+    "changes my mind",
+    "invalidate",
+    "unless",
+    "prove me wrong",
+)
+
+# A unit-carrying number: a $ amount, a percent, a multiple (x), a
+# K/M/B-suffixed figure, or a spelled-out million/billion/trillion.
+# A bare number ("40,000") is NOT unit-carrying — it cites nothing
+# checkable on its own. Word boundaries keep "3 months" / "5 days"
+# from matching as a unit.
+_UNIT_NUMBER_RE = re.compile(
+    r"\$\s*\d"
+    r"|\d[\d,]*\.?\d*\s*(%|[xX]\b|[KMB]\b|million\b|billion\b|trillion\b)",
+    re.IGNORECASE)
+
+# The word "watch" as a whole word (not "watching" / "watchlist").
+_WATCH_RE = re.compile(r"\bwatch\b", re.IGNORECASE)
+
+MAX_HEADLINE_LINE_CHARS = 90
+
+
+def ends_with_question(post: str) -> bool:
+    """True when the post's last non-blank character is '?'. The
+    question gate (audit §G.5): every experiment post ends with
+    ONE specific question."""
+    return bool((post or "").strip().endswith("?"))
+
+
+def has_falsifiability_phrase(post: str) -> bool:
+    """True when the post names what would prove the author wrong."""
+    lowered = (post or "").lower()
+    return any(phrase in lowered for phrase in FALSIFIABILITY_PHRASES)
+
+
+def has_unit_number(post: str) -> bool:
+    """True when the post carries >= 1 unit-carrying number."""
+    return bool(_UNIT_NUMBER_RE.search(post or ""))
+
+
+def has_watch_clause(post: str) -> bool:
+    """True when the word "watch" appears in the last two sentences
+    (audit §G.4: "what to watch next")."""
+    sentences = [s.strip() for s in
+                 re.split(r"(?<=[.!?])\s+", (post or "").strip()) if s.strip()]
+    tail = " ".join(sentences[-2:])
+    return bool(_WATCH_RE.search(tail))
+
+
+def _headline_lines(post: str) -> list:
+    """Non-empty lines of the post's first paragraph (the headline
+    block): text before the first blank line."""
+    first = re.split(r"\n\s*\n", (post or "").strip(), maxsplit=1)[0]
+    return [line.strip() for line in first.split("\n") if line.strip()]
+
+
+def check_pulse_headline(post: str, symbol: str = None) -> tuple:
+    """Market Pulse headline rule (audit §G.2): the headline block
+    is at most 2 lines, each <= 90 chars, and the second line
+    exists and is non-empty. Line 1 starting with $SYMBOL is NOT
+    checked here — validate_draft_json already enforces it
+    ("cashtag_not_first") before this runs; duplicating it would
+    double-report the same failure. Returns (True, "") or
+    (False, reason)."""
+    lines = _headline_lines(post)
+    if len(lines) < 2:
+        return (False, "mode_pulse_headline_missing_second_line")
+    if len(lines) > 2:
+        return (False, "mode_pulse_headline_too_many_lines")
+    for line in lines[:2]:
+        if len(line) > MAX_HEADLINE_LINE_CHARS:
+            return (False, "mode_pulse_headline_too_long")
+    return (True, "")
+
+
+def validate_mode_post(post: str, symbol: str, mode: str) -> tuple:
+    """Mode checks for one generated post. Question gate first
+    (all modes: the post must end with '?'), then the per-mode
+    check. Returns (True, "") or (False, reason); the caller
+    retries once with the reason, then skips. The numbers the post
+    cites were already matched to the snapshot by
+    validate_draft_json before this runs — the onchain check here
+    only adds the >= 1 unit-carrying number presence check, which
+    validate_draft_json passes vacuously with none."""
+    if mode not in MODE_NAMES:
+        return (False, f"mode_unknown:{mode}")
+    if not ends_with_question(post):
+        return (False, "mode_question_missing")
+    if mode == "pulse":
+        return check_pulse_headline(post, symbol)
+    if mode == "contrarian":
+        if not has_falsifiability_phrase(post):
+            return (False, "mode_contrarian_no_falsifiability")
+        return (True, "")
+    # onchain
+    if not has_unit_number(post):
+        return (False, "mode_onchain_no_number")
+    if not has_watch_clause(post):
+        return (False, "mode_onchain_no_watch_clause")
+    return (True, "")
 
 
 

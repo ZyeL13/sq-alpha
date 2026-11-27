@@ -345,7 +345,75 @@ EDITORIAL_FORBIDDEN = [
     "shadow accumulation",
     "silent wallets",
     "insiders loading",
+    # Article redesign §3.3: the two observed generic-AI sentences
+    # from the PYR article plus the template habits they exemplify.
+    # The §6.1 repetition gate is the real mechanism; this list is
+    # the backstop (matched case-insensitively, as today).
+    "the distinction matters",
+    "that makes restraint part of the analysis",
+    "size is not explanation",
+    "in plain terms",
+    "that gap prevents",
+    "neither can be asserted",
+    "go beyond the evidence",
+    "leaves room for",
+    "is evidence of what has happened, not proof of what must happen next",
+    "that makes restraint",
+    "a lack of analysis",
 ]
+
+# ========== ARTICLE REDESIGN — STANCE + VERB SCALE (spec §5.3) ==========
+# Stance is code-derived, never LLM-invented (§3.4). Verb scale by
+# |change_24h|: the headline verb must match the magnitude band
+# (gate §6.5 checks this in generators/json_validate.py).
+
+
+def derive_stance(change, category=None) -> str:
+    """Code-derived article stance: BEARISH / BULLISH / NEUTRAL.
+
+    change <= -10 -> BEARISH; >= +10 -> BULLISH; else NEUTRAL, with
+    a category tiebreak when |change| < 3 (LOSERS -> BEARISH,
+    GAINERS -> BULLISH). MIXED is not supported in v1 — a mixed read
+    is NEUTRAL with the counter-case in the article body.
+    """
+    try:
+        chg = float(change)
+    except (TypeError, ValueError):
+        chg = 0.0
+    if chg <= -10:
+        return "BEARISH"
+    if chg >= 10:
+        return "BULLISH"
+    if abs(chg) < 3:
+        cat = (category or "").upper()
+        if cat == "LOSERS":
+            return "BEARISH"
+        if cat == "GAINERS":
+            return "BULLISH"
+    return "NEUTRAL"
+
+
+# (min |change|, bearish verb, bullish verb). Bands are lower-bound
+# inclusive: >= 30, 15-30, 10-15, 5-10, < 5.
+VERB_SCALE = (
+    (30, "COLLAPSES", "SURGES"),
+    (15, "TUMBLES", "JUMPS"),
+    (10, "SLIDES", "CLIMBS"),
+    (5, "DIPS", "GAINS"),
+    (0, "HOLDS FLAT", "EDGES UP"),
+)
+
+
+def verb_for_change(change) -> str:
+    """The headline verb for a 24h change, per the §5.3 scale."""
+    try:
+        chg = float(change)
+    except (TypeError, ValueError):
+        chg = 0.0
+    for floor, bearish, bullish in VERB_SCALE:
+        if abs(chg) >= floor:
+            return bearish if chg < 0 else bullish
+    return "EDGES UP"
 
 # Per-style guidance injected into the prompt. Short on purpose: the
 # style name plus its job. The voice itself comes from VOICE_CALIBRATION.
@@ -480,6 +548,64 @@ def _range_position(token) -> float:
     return 0.5
 
 
+def select_post_format_with_reason(token, category, scores=None, counts=None):
+    """Like select_post_format, but also returns the long-form
+    justification — the editorial angle the research pack carries
+    (spec §4.1): "anomaly" / "volume event" / "contrarian" /
+    "catalyst follow-through" / "range edge". The justification is
+    None when the format is not longform. select_post_format calls
+    this and returns only the format, so its behavior is unchanged.
+    """
+    from config import IMAGE_MAX_PER_DAY, LONGFORM_MAX_PER_DAY
+
+    counts = counts or {}
+    image_used = counts.get("image", 0) or 0
+    longform_used = counts.get("longform", 0) or 0
+
+    chg = token.get("price_change_percent", 0) or 0
+    vol = token.get("volume_24h", 0) or 0
+    has_news = bool(token.get("news_catalyst"))
+    range_pos = _range_position(token)
+    anomaly = _anomaly(token, scores)
+    chg_news = _chg_since_news(token)
+    vol_chg_news = _vol_chg_since_news(token)
+
+    if longform_used < LONGFORM_MAX_PER_DAY:
+        contrarian = (
+            chg_news is not None
+            and abs(chg_news) >= 3
+            and abs(chg) >= 3
+            and (chg_news > 0) != (chg > 0)
+        )
+        catalyst_followthrough = (
+            has_news and chg_news is not None and abs(chg_news) >= 5
+        )
+        range_edge = (range_pos <= 0.10 or range_pos >= 0.90) and abs(chg) >= 5
+        volume_event = vol_chg_news is not None and abs(vol_chg_news) >= 50
+        if anomaly >= 0.7:
+            return "longform", "anomaly"
+        if volume_event:
+            return "longform", "volume event"
+        if contrarian:
+            return "longform", "contrarian"
+        if catalyst_followthrough:
+            return "longform", "catalyst follow-through"
+        if range_edge:
+            return "longform", "range edge"
+
+    if image_used < IMAGE_MAX_PER_DAY:
+        if (
+            anomaly >= 0.5
+            or abs(chg) >= 10
+            or vol > 50_000_000
+            or range_pos <= 0.15
+            or range_pos >= 0.85
+        ):
+            return "image", None
+
+    return "short", None
+
+
 def select_post_format(token, category, scores=None, counts=None) -> str:
     """Decide the publishing format BEFORE generation: "short",
     "image", or "longform".
@@ -516,46 +642,8 @@ def select_post_format(token, category, scores=None, counts=None) -> str:
     When a format's cap is already used, selection falls through to
     the next format; ordinary tokens always land on "short".
     """
-    from config import IMAGE_MAX_PER_DAY, LONGFORM_MAX_PER_DAY
-
-    counts = counts or {}
-    image_used = counts.get("image", 0) or 0
-    longform_used = counts.get("longform", 0) or 0
-
-    chg = token.get("price_change_percent", 0) or 0
-    vol = token.get("volume_24h", 0) or 0
-    has_news = bool(token.get("news_catalyst"))
-    range_pos = _range_position(token)
-    anomaly = _anomaly(token, scores)
-    chg_news = _chg_since_news(token)
-    vol_chg_news = _vol_chg_since_news(token)
-
-    if longform_used < LONGFORM_MAX_PER_DAY:
-        contrarian = (
-            chg_news is not None
-            and abs(chg_news) >= 3
-            and abs(chg) >= 3
-            and (chg_news > 0) != (chg > 0)
-        )
-        catalyst_followthrough = (
-            has_news and chg_news is not None and abs(chg_news) >= 5
-        )
-        range_edge = (range_pos <= 0.10 or range_pos >= 0.90) and abs(chg) >= 5
-        volume_event = vol_chg_news is not None and abs(vol_chg_news) >= 50
-        if anomaly >= 0.7 or volume_event or contrarian or catalyst_followthrough or range_edge:
-            return "longform"
-
-    if image_used < IMAGE_MAX_PER_DAY:
-        if (
-            anomaly >= 0.5
-            or abs(chg) >= 10
-            or vol > 50_000_000
-            or range_pos <= 0.15
-            or range_pos >= 0.85
-        ):
-            return "image"
-
-    return "short"
+    fmt, _ = select_post_format_with_reason(token, category, scores, counts)
+    return fmt
 
 
 def insufficient_insight(token, scores=None) -> "str | None":

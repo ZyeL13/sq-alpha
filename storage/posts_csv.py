@@ -2,10 +2,13 @@
 #
 # One row per scheduled post, written at schedule time (the
 # commitment point). Columns: time_wib, symbol, angle, card_type,
-# word_count, model, provider, prompt_version, views_1h, replies_1h.
-# The last two are blank at write time; zyel fills them manually
-# from the Square views harvest. The CSV is the human-filled
-# experiment record; the audit logs stay machine text.
+# word_count, model, provider, prompt_version, views_1h, replies_1h,
+# format, mode, hypothesis, variable_tested, views_6h, age_h,
+# replies_24h. The views/replies columns are blank at write time;
+# zyel fills them manually from the Square views harvest. The CSV is
+# the human-filled experiment record; the audit logs stay machine
+# text. Appended columns keep old rows' shape (new fields are
+# empty on old rows).
 # Header is written once (create-if-missing or empty file).
 # POSTS_CSV_PATH is module-level so tests can point it at a tmp file.
 import csv
@@ -17,11 +20,16 @@ from config import BASE_DIR, WIB
 POSTS_CSV_PATH = os.path.join(BASE_DIR, "logs", "posts.csv")
 
 COLUMNS = ["time_wib", "symbol", "angle", "card_type", "word_count",
-           "model", "provider", "prompt_version", "views_1h", "replies_1h"]
+           "model", "provider", "prompt_version", "views_1h", "replies_1h",
+           "format", "mode", "hypothesis", "variable_tested",
+           "views_6h", "age_h", "replies_24h"]
 
 
 def append_post_row(*, symbol, angle, card_type, word_count, model,
-                    provider, prompt_version, csv_path=None):
+                    provider, prompt_version, csv_path=None,
+                    format="short", mode="", hypothesis="",
+                    variable_tested="", views_6h="", age_h="",
+                    replies_24h=""):
     """Append one row. Returns the path written. Best-effort: a
     logging failure must never break scheduling, so callers swallow
     exceptions from this function."""
@@ -44,5 +52,12 @@ def append_post_row(*, symbol, angle, card_type, word_count, model,
             prompt_version,
             "",
             "",
+            format or "short",
+            mode or "",
+            hypothesis or "",
+            variable_tested or "",
+            views_6h,
+            age_h,
+            replies_24h,
         ])
     return path

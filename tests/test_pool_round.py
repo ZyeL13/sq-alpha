@@ -388,7 +388,8 @@ def _real_draft_harness(_harness, monkeypatch, replies):
 
     monkeypatch.setattr(pg, "generate", fake_generate)
     monkeypatch.setattr(orch, "prepare_draft", _REAL_PREPARE_DRAFT)
-    monkeypatch.setattr(orch, "select_post_format", lambda *a, **k: "short")
+    monkeypatch.setattr(orch, "select_post_format_with_reason",
+                        lambda *a, **k: ("short", None))
     monkeypatch.setattr(orch, "get_format_counts", lambda: {})
     return calls
 

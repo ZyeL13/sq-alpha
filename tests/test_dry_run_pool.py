@@ -32,7 +32,15 @@ def test_dry_run_pool_exits_zero_and_names_a_winner(tmp_path):
     csv_text = csv_path.read_text()
     assert "NOVA" in csv_text
     assert "unknown" in csv_text  # no LLM in dry-run: provider is unknown
-    # The winner is an image post: exactly one card rendered.
+    # The winner is an image post: its card rendered, plus the PYR
+    # article banner from the article dry-run block (same cards dir).
     cards = list((out / "cards").glob("*.png"))
-    assert len(cards) == 1
-    assert cards[0].name.startswith("NOVA_")
+    assert len(cards) == 2
+    names = sorted(c.name for c in cards)
+    assert names[0].startswith("NOVA_")
+    assert names[1].startswith("PYR_banner_B_")
+    # The article dry-run section is in the report, with the §11
+    # bias verdict and the banner/style line.
+    assert "ARTICLE DRY-RUN (PYR" in report.read_text()
+    assert "POOL-SCORING BIAS" in report.read_text()
+    assert "banner=" in report.read_text() and "style=B" in report.read_text()

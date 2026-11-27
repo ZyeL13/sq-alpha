@@ -205,8 +205,12 @@ def orch(monkeypatch, tmp_path):
                      f"to pass. Does the tape stay this loud?"),
         }
 
-    def fake_longform(token, category, scores):
+    def fake_longform(token, category, scores, snapshot=None,
+                      justification=None, memory=None, **kwargs):
         calls["generate_longform"].append(token["symbol"])
+        calls["longform_kwargs"] = {"snapshot": snapshot,
+                                    "justification": justification,
+                                    "memory": memory}
         return (f"{token['symbol']}: 24h Read", f"${token['symbol']} article body.")
 
     def fake_render(token, snapshot=None, card_type=None, question=None,
@@ -324,15 +328,23 @@ def test_prepare_post_no_card_type_degrades_to_short(orch, monkeypatch):
     assert content.startswith("$KITE")
 
 
-def test_prepare_post_longform_does_not_fetch_snapshot(orch, monkeypatch):
+def test_prepare_post_longform_fetches_snapshot(orch, monkeypatch):
+    # Article redesign §7: the snapshot IS built for long-form now
+    # (research pack + banner need it); klines failure still
+    # publishes coverless instead of dropping the article.
     orch_mod, calls = orch
+    from schedulers.snapshot import CardSnapshot
 
     seen = []
     monkeypatch.setattr(orch_mod, "build_snapshot",
-                        lambda token: seen.append(token["symbol"]))
+                        lambda token: seen.append(token["symbol"]) or
+                        CardSnapshot(token=_token(), closes=[2.0] * 24,
+                                     volume_7d_avg=1_000_000, btc_change=2.0))
     content, fmt, title, image_paths = orch_mod.prepare_post(_token(), "HOT", {"anomaly": 0.9})
     assert fmt == "longform"
-    assert seen == []  # long-form covers keep the plain renderer
+    assert seen == ["KITE"]
+    assert calls["longform_kwargs"]["snapshot"] is not None
+    assert calls["longform_kwargs"]["justification"] == "anomaly"
 
 
 def test_prepare_post_image_render_failure_degrades_to_short(orch, monkeypatch):
@@ -350,25 +362,33 @@ def test_prepare_post_image_render_failure_degrades_to_short(orch, monkeypatch):
     assert content.startswith("$KITE")  # the post is never dropped
 
 
-def test_prepare_post_longform_renders_cover_one_call(orch):
+def test_prepare_post_longform_renders_cover_one_call(orch, monkeypatch):
     orch_mod, calls = orch
 
+    banner_calls = []
+    monkeypatch.setattr(orch_mod._banner, "render_article_banner",
+                        lambda *a, **k: banner_calls.append((a, k)) or
+                        "/tmp/cards/KITE_banner.png")
     result = orch_mod.prepare_post(_token(), "HOT", {"anomaly": 0.9})
     content, fmt, title, image_paths = result
     assert fmt == "longform"
     assert title == "KITE: 24h Read"
-    assert image_paths == ["/tmp/cards/KITE_1.png"]
+    assert image_paths == ["/tmp/cards/KITE_banner.png"]
     assert calls["generate_longform"] == ["KITE"]
     assert calls["generate_post"] == []  # no second LLM call
-    assert calls["render"] == ["KITE"]
+    assert calls["render"] == []  # the plain card is not the cover
+    assert len(banner_calls) == 1  # exactly one banner render
+    banner_args, banner_kwargs = banner_calls[0]
+    assert banner_args[1] is not None  # the snapshot (closes for style C)
+    assert banner_args[0]["symbol"] == "KITE"
 
 
 def test_prepare_post_longform_render_failure_keeps_article_coverless(orch, monkeypatch):
     orch_mod, calls = orch
     from schedulers.card_renderer import CardRenderError
 
-    monkeypatch.setattr(orch_mod, "render_card",
-                        lambda token, snapshot=None, **kw: (_ for _ in ()).throw(CardRenderError("boom")))
+    monkeypatch.setattr(orch_mod._banner, "render_article_banner",
+                        lambda *a, **kw: (_ for _ in ()).throw(CardRenderError("boom")))
     content, fmt, title, image_paths = orch_mod.prepare_post(_token(), "HOT", {"anomaly": 0.9})
     assert fmt == "longform"  # not truncated to short
     assert title == "KITE: 24h Read"
@@ -379,7 +399,7 @@ def test_prepare_post_longform_render_failure_keeps_article_coverless(orch, monk
 def test_prepare_post_longform_failure_falls_back_to_short(orch, monkeypatch):
     orch_mod, calls = orch
 
-    def failing_longform(token, category, scores):
+    def failing_longform(token, category, scores, **kwargs):
         calls["generate_longform"].append(token["symbol"])
         return None
 

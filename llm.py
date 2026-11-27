@@ -293,6 +293,11 @@ def _call_provider(provider: str, user_prompt: str, system_prompt: str,
                             "provider": provider,
                             "model": cfg["model"],
                             "usage": data.get("usage", {}) or {},
+                            # Article redesign §6.6a: finish_reason is
+                            # needed for NON-empty replies too — a
+                            # reply cut by length looks like success
+                            # without it.
+                            "finish_reason": choice.get("finish_reason"),
                         }
                         return content, None
                     else:

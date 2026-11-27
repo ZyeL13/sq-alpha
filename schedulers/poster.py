@@ -25,6 +25,18 @@ if not audit_logger.handlers:
 _shutdown_done = False
 
 
+class ArticleTooLongError(Exception):
+    """A long-form body over ARTICLE_MAX_CHARS: a publish refusal,
+    never a silent cut (spec §6.6c). `length` is the stripped body
+    length the poster measured, so the log line can carry it."""
+
+    def __init__(self, length: int):
+        self.length = length
+        super().__init__(
+            f"long-form body {length} chars exceeds "
+            f"ARTICLE_MAX_CHARS {ARTICLE_MAX_CHARS}")
+
+
 def _strip_square_markdown(text: str) -> str:
     """Remove markdown characters that might cause issues."""
     for ch in ('*', '_', '`', '>', '<', '#', '—'):
@@ -39,7 +51,10 @@ def clean_for_square(text: str, format: str = "short") -> str:
 
     V3: format-aware cap. Short posts keep the historical 900-char
     cap and identical behaviour; articles get ARTICLE_MAX_CHARS
-    (Square's 20013 limit is unpublished — probe-tunable).
+    (Square's 20013 limit is unpublished — probe-tunable). A
+    long-form body over the cap is NEVER silently cut: it raises
+    ArticleTooLongError (spec §6.6c) and the poster refuses to
+    publish it.
     """
     if not text:
         return ""
@@ -48,6 +63,8 @@ def clean_for_square(text: str, format: str = "short") -> str:
 
     max_chars = ARTICLE_MAX_CHARS if format == "longform" else 900
     if len(text) > max_chars:
+        if format == "longform":
+            raise ArticleTooLongError(len(text))
         text = text[:max_chars]
 
     return text
@@ -223,6 +240,17 @@ def post_to_targets(content, category, symbol=None, hook=None, angle=None, sessi
     # Check limit before anything
     shutdown_if_limit_reached()
 
+    # Loud refusal (spec §6.6c): an over-cap article is measured
+    # BEFORE Telegram posts anything, so a refused article publishes
+    # nowhere — not even to the optional channel.
+    if format == "longform":
+        try:
+            clean_for_square(content, format="longform")
+        except ArticleTooLongError as e:
+            audit_logger.info(f"ARTICLE_TRUNCATED|{symbol}|{e.length}")
+            print(f"  ❌ Article too long ({e.length} chars), refusing to publish")
+            return False
+
     today_posts = get_today_posts()
     remaining = DAILY_POST_LIMIT - today_posts
     print(f"  📊 Square posts today: {today_posts}/{DAILY_POST_LIMIT} (remaining: {remaining})")
@@ -239,8 +267,16 @@ def post_to_targets(content, category, symbol=None, hook=None, angle=None, sessi
     # Post to Square (counts toward limit)
     square_success = False
     if BINANCE_SQUARE_KEY and BINANCE_SQUARE_URL:
-        square_success = post_to_square(content, format=format, title=title,
-                                        image_paths=image_paths, symbol=symbol)
+        try:
+            square_success = post_to_square(content, format=format, title=title,
+                                            image_paths=image_paths, symbol=symbol)
+        except ArticleTooLongError as e:
+            # Unreachable after the pre-check above for the same
+            # content, but post_to_square is also called directly:
+            # the refusal is loud here too, never a silent cut.
+            audit_logger.info(f"ARTICLE_TRUNCATED|{symbol}|{e.length}")
+            print(f"  ❌ Article too long ({e.length} chars), refusing to publish")
+            return False
         if square_success:
             print("  ✅ Square posted (COUNTED)")
             increment_post_counter()

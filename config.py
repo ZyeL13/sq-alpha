@@ -336,16 +336,26 @@ IMAGE_MAX_PER_DAY = 3
 # schedulers/card_renderer._resolve_style).
 CARD_STYLE = os.getenv("CARD_STYLE", "sketchnote").strip().lower()
 V3_IMAGE_PROVIDER = "local"  # "local" only in Phase 1/2; "gemini" is a Phase 3 option
-ARTICLE_MAX_CHARS = 5000  # probe-tunable; Square's 20013 limit is unpublished
+ARTICLE_MAX_CHARS = 6000  # probe-tunable; Square's 20013 limit is unpublished
 # Long-form-only LLM budget. gpt-oss-120b spends reasoning tokens out
 # of the same max_tokens, so the short-form 1800 would starve a
 # 600-900-word article; watch finish_reason=length, fall back to
 # short text when the article fails validation.
 LONGFORM_MAX_TOKENS = 3500
+# Article prompt target (words) — spec §3.2: 550-750, down from the
+# old inline 600-900 (which could exceed the poster cap by design).
+LONGFORM_TARGET_WORDS = (550, 750)
+# Banner style override for articles ("AUTO" = deterministic pick;
+# worker B reads this). Default AUTO.
+ARTICLE_BANNER_STYLE = os.environ.get("ARTICLE_BANNER_STYLE", "AUTO")
 
 # Step 1 experiment variable (spec §1.8): stamped into logs/posts.csv
 # so each row joins to its experiment row in docs/experiments.md.
 PROMPT_VERSION = "json-v1"
+
+# Article experiment variable (article redesign, spec §4.2/§7):
+# stamped on long-form rows so they join to the article experiment.
+ARTICLE_PROMPT_VERSION = "article-v1"
 
 # ========== CLOSER SETTINGS ==========
 CLOSER_ENABLED = False  # True untuk aktif, False untuk mati

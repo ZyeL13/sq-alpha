@@ -132,7 +132,12 @@ def _range_position(token: dict) -> float:
 
 
 def _load_font(bold: bool, size: int):
-    """Best-effort DejaVu load; PIL's default font when none is found."""
+    """Best-effort DejaVu load; PIL's default font when none is found.
+
+    Shared with schedulers/banner.py (article banners import this
+    and _fit_font instead of duplicating them — the banner module
+    is the only other importer; the plain/sketchnote paths below
+    are unchanged by that sharing)."""
     from PIL import ImageFont
 
     fname = _FONT_FILES["bold" if bold else "regular"]
